@@ -1,0 +1,263 @@
+// file: src/generation/concepts.ts
+import { generateJson, generateMarkdown } from '../llm/openai';
+
+type Ctx = {
+  subjectName: string;
+  sectionTitle: string;
+  sectionDescription: string;
+  topicTitle: string;
+  topicDescription: string;
+};
+
+export async function proposeConceptTitles(args: {
+  subjectName: string;
+  sectionTitle: string;
+  topicTitle: string;
+  topicDescription: string;
+  count: number; // 4–6 domyślnie
+}) {
+  const count = Math.min(Math.max(args.count ?? 5, 4), 6);
+
+  // Czysty JSON (tablica tytułów). Krótko i konkretnie.
+  const prompt =
+    'Zwróć WYŁĄCZNIE poprawny JSON: tablicę ' + count +
+    ' krótkich tytułów (4–7 słów), każdy to kąt interpretacyjny (nie kategoria). ' +
+    'Unikaj słów-parasoli typu: "Motyw", "Kontekst", "Język i środki", "Środki stylistyczne", "Funkcje". ' +
+    'Kontekst: ' +
+    `Przedmiot=${args.subjectName}; Sekcja=${args.sectionTitle}; ` +
+    `Temat=${args.topicTitle}; OpisTematu=${args.topicDescription};`;
+
+  return generateJson<string[]>(prompt);
+}
+
+/**
+ * Minimalny fallback.
+ * UWAGA: w sekcji „Treść” zostawiamy POWTÓRZONY H1 (jak chciałeś),
+ * a „ścianę tekstu” rozbijamy później w ensureFormattedConcept() na cytat + paragrafy.
+ */
+export function conceptMarkdownFromTitle(title: string, ctx: Ctx) {
+  return [
+    `# ${title}`,
+    ``,
+    `> **Czas nauki:** ok. 5 minut`,
+    `> **Trudność:** 2`,
+    `> **Rodzaj materiału:** Temat główny`,
+    `> **Umiejętności:** interpretacja, myślenie analityczne`,
+    `> **Powiązania:** ${ctx.topicTitle}`,
+    ``,
+    `### Cel nauki`,
+    `Zrozumiesz wybrany aspekt tematu „${ctx.topicTitle}” w kontekście epoki i pobożności.`,
+    ``,
+    `### Treść`,
+    `# ${title}`,
+    `Krótki opis (300–600 znaków) z pytaniem problemowym i zakotwiczeniem w kontekście.`,
+    ``,
+    `### Sonda / Źródło / Zajawka`,
+    `Jak jedno zdanie mogłoby zmienić odbiór cierpienia?`
+  ].join('\n');
+}
+
+/**
+ * Szablon LLM:
+ * - u góry H1,
+ * - sekcje: Cel nauki / Treść / Sonda…,
+ * - wewnątrz „Treść” pozostaje POWTÓRZONY H1 (duży tytuł),
+ * - reszta formatowana lokalnie (cytat + paragrafy).
+ */
+export async function expandConceptMarkdown(title: string, ctx: Ctx) {
+  const strictTemplate = [
+    `Zwróć WYŁĄCZNIE poniższy układ Markdown (bez komentarzy, bez code fence’ów, bez niczego przed i po):`,
+    ``,
+    `# ${title}`,
+    ``,
+    `> **Czas nauki:** ok. <liczba> minut  `,
+    `> **Trudność:** <1–4>  `,
+    `> **Rodzaj materiału:** <np. Temat główny | Związek między tematami | Ćwiczenie>  `,
+    `> **Umiejętności:** <2–4 elementy CSV>  `,
+    `> **Powiązania:** <lista CSV lub średniki>`,
+    ``,
+    `### Cel nauki`,
+    `<1–2 zdania o tym, co uczeń zrozumie, odkryje lub poczuje>`,
+    ``,
+    `### Treść`,
+    `# ${title}`,
+    `<krótka treść (300–600 znaków), styl odkrywczy i obrazowy; pytania retoryczne i kontekst epoki są mile widziane>`,
+    ``,
+    `### Sonda / Źródło / Zajawka`,
+    `<pytanie, cytat, ciekawostka, impuls do refleksji>`
+  ].join('\n');
+
+  const prompt =
+    'Wygeneruj DOKŁADNIE 1 atomowy koncept edukacyjny (po polsku, liceum). ' +
+    'Styl: odkrywczy, angażujący, obrazowy. Bez metakomentarzy. ' +
+    `Kontekst: Przedmiot=${ctx.subjectName}; Sekcja=${ctx.sectionTitle}; OpisSekcji=${ctx.sectionDescription}; ` +
+    `Temat=${ctx.topicTitle}; OpisTematu=${ctx.topicDescription}; TytułH1="${title}".\n\n` +
+    strictTemplate;
+
+  let out = '';
+  try {
+    out = await generateMarkdown(prompt);
+  } catch {
+    out = conceptMarkdownFromTitle(title, ctx);
+  }
+
+  return ensureFormattedConcept(out, title, ctx);
+}
+
+/**
+ * Naprawa i FORMATOWANIE „Treść”:
+ * - zostawiamy powtórzony H1,
+ * - TUŻ PO H1 wstawiamy krótki pull-quote (pierwsze zdanie),
+ * - dalsze zdania dzielimy na krótkie akapity (<p>…</p>),
+ * - miękkie pogrubienia terminów (**…**),
+ * - rytm i powietrze (Swiss Design: hierarchia, siatka, krótkie bloki).
+ */
+function ensureFormattedConcept(md: string, title: string, ctx: Ctx): string {
+  const lines = (md || '').split(/\r?\n/);
+
+  const hasH1 = /^#\s+/.test(lines[0] || '');
+  const metaIdxStart = lines.findIndex(l => /^>\s*\*\*Czas nauki:\*\*/i.test(l));
+  const hasMetaBlock =
+    metaIdxStart >= 0 &&
+    lines.slice(metaIdxStart, metaIdxStart + 5).join('\n').includes('**Trudność:**') &&
+    lines.slice(metaIdxStart, metaIdxStart + 5).join('\n').includes('**Rodzaj materiału:**') &&
+    lines.slice(metaIdxStart, metaIdxStart + 5).join('\n').includes('**Umiejętności:**') &&
+    lines.slice(metaIdxStart, metaIdxStart + 5).join('\n').includes('**Powiązania:**');
+
+  const hasCel = lines.some(l => /^###\s+Cel nauki\s*$/i.test(l));
+  const hasTresciHeader = lines.some(l => /^###\s+Treść\s*$/i.test(l));
+  const hasInnerH1 = lines.some((l, i) => i > 0 && /^#\s+/.test(l)); // powtórzony wielki tytuł
+  const hasSonda = lines.some(l => /^###\s+Sonda\s*\/\s*Źródło\s*\/\s*Zajawka\s*$/i.test(l));
+
+  const reconstructed: string[] = [];
+
+  // H1
+  reconstructed.push(`# ${title}`, '');
+
+  // Meta
+  if (!hasMetaBlock) {
+    reconstructed.push(
+      `> **Czas nauki:** ok. 5 minut`,
+      `> **Trudność:** 2`,
+      `> **Rodzaj materiału:** Temat główny`,
+      `> **Umiejętności:** interpretacja, analiza kontekstu`,
+      `> **Powiązania:** ${ctx.topicTitle}`,
+      ``
+    );
+  } else {
+    reconstructed.push(...lines.slice(metaIdxStart, metaIdxStart + 5), '');
+  }
+
+  // Cel
+  reconstructed.push(`### Cel nauki`);
+  const celFromModel = extractSection(md, /^###\s+Cel nauki\s*$/i, /^(###\s+Treść|###\s+Sonda\s*\/)/i);
+  reconstructed.push(
+    celFromModel?.trim() ||
+      `Zrozumiesz wybrany aspekt tematu „${ctx.topicTitle}” oraz powiążesz go z kontekstem epoki i wrażliwością odbiorcy.`,
+    ''
+  );
+
+  // Treść – H1 + pull-quote + paragrafy
+  reconstructed.push(`### Treść`, `# ${title}`);
+  const trescFromModel = extractSection(md, /^###\s+Treść\s*$/i, /^###\s+Sonda\s*\/\s*Źródło\s*\/\s*Zajawka\s*$/i);
+  const cleaned = (trescFromModel && clampChars(trescFromModel, 300, 900)) ||
+    `Krótki opis (300–600 znaków): uchwyć punkt widzenia, zadaj pytanie retoryczne i osadź to w realnym kontekście.`;
+
+  const formattedBody = formatReadableTextWithQuote(cleaned);
+  reconstructed.push(formattedBody, '');
+
+  // Sonda
+  reconstructed.push(`### Sonda / Źródło / Zajawka`);
+  const sondaFromModel = extractSection(md, /^###\s+Sonda\s*\/\s*Źródło\s*\/\s*Zajawka\s*$/i, /^$/);
+  reconstructed.push(
+    sondaFromModel?.trim() ||
+      `Czy **empatia** wobec **cierpienia** może być formą **poznania**?`
+  );
+
+  return reconstructed.join('\n').trim();
+}
+
+/**
+ * „Treść” z cytatem: pierwsze zdanie → blockquote,
+ * reszta → <p>…</p>, plus pogrubienia terminów.
+ */
+function formatReadableTextWithQuote(raw: string): string {
+  const normalized = raw.replace(/\r/g, '').replace(/[ \t]+/g, ' ').trim();
+
+  // Jeśli są już znaczniki, tylko podbij słowa-klucze.
+  if (/^<p>|<\/p>|^#\s+|^###\s+|^>\s/m.test(normalized)) {
+    return autoEmbolden(normalized);
+  }
+
+  const sentences = normalized
+    .split(/(?<=[\.\!\?…])\s+(?=[A-ZĄĆĘŁŃÓŚŹŻ0-9])/)
+    .map(s => s.trim())
+    .filter(Boolean);
+
+  const first = sentences[0] || '';
+  const rest = sentences.slice(1);
+
+  const parts: string[] = [];
+  if (first) parts.push(`> ${autoEmbolden(first)}`);
+
+  // grupuj po 2 zdania, robiąc krótkie akapity
+  for (let i = 0; i < rest.length; i += 2) {
+    const para = rest.slice(i, i + 2).join(' ');
+    parts.push(`<p>${autoEmbolden(para)}</p>`);
+  }
+
+  // jeśli wyszedł tylko cytat – dokładamy choć jeden paragraf
+  if (parts.length === 1 && rest.length) {
+    parts.push(`<p>${autoEmbolden(rest.join(' '))}</p>`);
+  }
+
+  return parts.join('\n\n').trim();
+}
+
+/**
+ * Delikatne pogrubienie „ważnych terminów”:
+ * - cudzysłowy → **…**
+ * - krótka lista słów-kluczy PL → **…**
+ */
+function autoEmbolden(text: string): string {
+  let out = text
+    .replace(/[„"](.*?)[”"]/g, (_m, g1) => `**${g1}**`)
+    .replace(/"(.*?)"/g, (_m, g1) => `**${g1}**`);
+
+  const keywords = [
+    'teza', 'argument', 'kontrast', 'kontekst', 'motyw', 'symbol', 'paradoks',
+    'ironia', 'metafora', 'narracja', 'bohater', 'wartości', 'cierpienie',
+    'empatia', 'poznanie', 'epoka', 'autor', 'odbiorca'
+  ];
+
+  for (const kw of keywords) {
+    const rx = new RegExp(`\\b(${kw})\\b`, 'gi');
+    out = out.replace(rx, (_m, g1) => `**${g1}**`);
+  }
+  return out.replace(/\*\*\s*\*\*/g, '**');
+}
+
+/**
+ * Wyciąga sekcję markdown między dwoma nagłówkami.
+ */
+function extractSection(md: string, startRx: RegExp, endRx: RegExp): string | null {
+  const lines = (md || '').split(/\r?\n/);
+  const start = lines.findIndex(l => startRx.test(l));
+  if (start < 0) return null;
+  let end = lines.slice(start + 1).findIndex(l => endRx.test(l));
+  end = end < 0 ? lines.length : start + 1 + end;
+  const body = lines.slice(start + 1, end).join('\n').trim();
+  return body || null;
+}
+
+/**
+ * Ucina/poszerza tekst do ~min..max znaków (na granicach zdań).
+ */
+function clampChars(text: string, min: number, max: number): string {
+  const t = text.replace(/\s+/g, ' ').trim();
+  if (t.length >= min && t.length <= max) return t;
+  if (t.length < min) return t;
+  const cut = t.slice(0, max + 1);
+  const lastDot = Math.max(cut.lastIndexOf('. '), cut.lastIndexOf('! '), cut.lastIndexOf('? '), cut.lastIndexOf('… '));
+  return (lastDot > min ? cut.slice(0, lastDot + 1) : cut).trim();
+}
