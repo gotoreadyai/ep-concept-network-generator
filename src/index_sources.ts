@@ -3,6 +3,7 @@ import process from 'node:process';
 import chalk from 'chalk';
 import { fetchTopicWithContext, fetchConceptPages, insertSourceMaterialPage } from './db/supabase';
 import { fetchSourcesAsMarkdown, saveSourcesDebugMarkdown } from './generation/sources';
+import { addEdge } from './db/edges';
 import { extractH1Title } from './util/markdown';
 
 const noColor = process.argv.includes('--no-color') || !!process.env.NO_COLOR;
@@ -33,7 +34,6 @@ async function main() {
     const conceptPages = await fetchConceptPages(topicId);
     const conceptTitles = conceptPages.map(p => p.title).filter(Boolean);
 
-    // --- Nowy przepływ: od razu Markdown ---
     const md = await fetchSourcesAsMarkdown({
       subjectName: ctx.subjectName,
       sectionTitle: ctx.sectionTitle,
@@ -51,9 +51,19 @@ async function main() {
     try { title = extractH1Title(md); }
     catch { title = `Źródła do: ${ctx.topicTitle}`; }
 
-    await insertSourceMaterialPage({ topicId, title, markdown: md, forTopicTitle: ctx.topicTitle });
-
+    const sourcePageId = await insertSourceMaterialPage({ topicId, title, markdown: md, forTopicTitle: ctx.topicTitle });
     console.log(chalk.green(`✅ Utworzono stronę source_material dla tematu "${ctx.topicTitle}"`));
+
+    // --- AUTOLINK: źródła → koncepty jako 'example' ---
+    for (const cp of conceptPages) {
+      try {
+        await addEdge({ source: sourcePageId, target: cp.id, type: 'example' });
+        console.log(chalk.gray(`↪︎ edge example: ${sourcePageId} → ${cp.id}`));
+      } catch (e: any) {
+        console.log(chalk.yellow(`⚠️ edge skip: ${e?.message || e}`));
+      }
+    }
+
     console.log(chalk.green(`🎯 Gotowe.`));
   } catch (e: any) {
     console.error(chalk.red('💥 Błąd:'), e?.message || e);
