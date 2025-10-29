@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Obraz Matki Dolorosa w utworze — edycja typograficzna</title>
+<link href="https://fonts.googleapis.com/css2?family=EB+Garamond:ital,wght@0,400;0,500;0,700;1,400;1,500&family=Inter:wght@400;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#faf9f7;--ink:#1d1b16;--muted:#6c675c;--rule:#c9c3b7;--accent:#8c2f39;--card:#ffffff;
+    --max: 960px; --col-gap: 3.2rem; --lh:1.75; --size:20px;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{--bg:#151412;--ink:#efede8;--muted:#b7b1a6;--rule:#3a372f;--card:#1d1c19;--accent:#ff6b73}
+  }
+  html{font-size: 100%;}
+  body{
+    margin:0; background:var(--bg); color:var(--ink);
+    font-family: "EB Garamond", serif; line-height: var(--lh);
+    text-rendering: optimizeLegibility; -webkit-font-smoothing: antialiased;
+    hyphens:auto; -webkit-hyphens:auto; hanging-punctuation:first allow-end;
+  }
+  .page{max-width:var(--max); margin:4rem auto; padding:0 1.25rem}
+  header{margin-bottom:2rem}
+  .overline{font-family: Inter, system-ui, sans-serif; font-variant-caps:all-small-caps; letter-spacing:.08em; color:var(--muted)}
+  h1{font-size: clamp(2.2rem, 4.5vw, 3.2rem); line-height:1.1; margin:.25rem 0 .75rem}
+  .dek{font-style:italic; color:var(--muted); max-width: 60ch}
+
+  .rule{height:2px; background:linear-gradient(90deg,var(--rule),transparent); margin:1.5rem 0 2rem;}
+
+  .lead{font-size: clamp(1.2rem, 2.2vw, 1.35rem); margin: 1.2rem 0 1.6rem;}
+  .lead:first-letter{float:left; font-size:3.2rem; line-height:.9; padding:.15rem .5rem 0 0; font-weight:700; color:var(--accent)}
+
+  /* Dwu-kolumnowy układ jak w magazynie */
+  .content{column-count:1; column-gap: var(--col-gap)}
+  @media (min-width: 900px){ .content{column-count:2} }
+  .content p{margin:0 0 1rem; text-align: justify;}
+
+  /* Śródtytuły przerywające kolumny */
+  .section{break-inside: avoid; column-span: all; margin: 2rem 0 1rem}
+  .section h2{font-size:1.15rem; font-family: Inter, system-ui, sans-serif; letter-spacing:.02em; margin:0 0 .25rem}
+  .section .subrule{height:1px; background:var(--rule); width: 120px}
+
+  /* Wyróżnione cytaty */
+  blockquote{column-span: all; margin:1.5rem 0; padding:1.1rem 1.3rem; background:var(--card); border:1px solid var(--rule); border-left:4px solid var(--accent); font-style:italic; color:var(--ink)}
+
+  /* Pull-quote na całą szerokość */
+  .pull{column-span: all; font-size: clamp(1.5rem, 3vw, 1.8rem); line-height:1.35; margin:1.2rem 0; font-weight:500;}
+  .pull::before{content:"C"; color:var(--accent); font-size:2em; vertical-align: -.35em; margin-right:.2em}
+  .pull cite{display:block; font-family: Inter, system-ui, sans-serif; color:var(--muted); font-size:.9rem; margin-top:.4rem}
+
+  /* Marginalia (przypisy w marginesie na szerokich ekranach) */
+  .note{font-family: Inter, system-ui, sans-serif; font-size:.9rem; color:var(--muted); break-inside: avoid; background:var(--card); border:1px solid var(--rule); padding:.6rem .8rem; border-radius:.5rem;}
+  .note{column-span: all; margin: .8rem 0 1.2rem;}
+
+  /* Listy motywów jako "karty" */
+  .cards{column-span: all; display:grid; grid-template-columns: repeat(auto-fit,minmax(220px,1fr)); gap:1rem; margin:1rem 0 1.5rem}
+  .card{background:var(--card); border:1px solid var(--rule); border-radius:.6rem; padding:1rem}
+  .card h3{font-family: Inter, system-ui, sans-serif; font-size:1rem; margin:0 0 .35rem}
+  .smallcaps{font-variant-caps: all-small-caps}
+
+  footer{column-span: all; margin-top:2rem; color:var(--muted); font-family: Inter, system-ui, sans-serif}
+</style>
+</head>
+<body>
+  <main class="page">
+    <header>
+      <div class="overline">Analiza literacka</div>
+      <h1>Obraz Matki Dolorosa w utworze</h1>
+      <p class="dek">Jak nadać motywowi cierpiącej matki formę, która łączy emocję, teologię i kulturę średniowiecza.</p>
+    </header>
+
+    <div class="rule"></div>
+
+    <p class="lead">W lamencie świętokrzyskim motyw cierpiącej matki łączy <span class="smallcaps">dewocję</span> i modlitwę z teologiczną refleksją nad męką Chrystusa. Bliska relacja matki z dzieckiem staje się konfesją wiary i sposobem zmagania z bólem świata.</p>
+
+    <section class="content">
+      <blockquote>Matka — poprzez apostrofy i błagalne prośby — staje się źródłem empatii, które mobilizuje do nawrócenia i pokuty.</blockquote>
+
+      <p>Dzięki intensywnej warstwie retorycznej postać Matki działa jak soczewka emocji: skupia indywidualne cierpienie i nadaje mu wymiar wspólnotowy. W ten sposób religijna kontemplacja przeradza się w wymóg etyczny: odpowiedź na cudze cierpienie.</p>
+
+      <div class="section"><h2>Symbolika i funkcje</h2><div class="subrule"></div></div>
+
+      <p>Rozmowa z Bogiem i światem odsłania gęstą symbolikę: udział w Męce Pańskiej, odwołanie do wartości rodzinnych oraz apel o wytrwałość. Tekst jest narzędziem duchowej pobożności, które kształtuje wrażliwość moralną i skłania do refleksji nad losem miłości i ofiary.</p>
+
+      <p class="pull">Cierpienie nie jest celem — jest językiem, którym opowiadamy o miłości i nadziei. <cite>Ujęcie interpretacyjne</cite></p>
+
+      <div class="cards">
+        <div class="card"><h3>Współczucie</h3><p>Buduje most między doświadczeniem jednostki a wspólnotą wiernych.</p></div>
+        <div class="card"><h3>Modlitwa</h3><p>Zmienia lament w akt sprawczy — prośba staje się działaniem.</p></div>
+        <div class="card"><h3>Ofiara</h3><p>Urealnia porządek teocentryczny i porządkuje sens bólu.</p></div>
+      </div>
+
+      <div class="section"><h2>Środki językowe</h2><div class="subrule"></div></div>
+
+      <p>Apostrofy, powtórzenia i napięta intonacja wzmacniają efekt dewocyjny. Dzięki temu utwór nie tylko przekazuje treść religijną, ale też <span class="smallcaps">kształtuje postawę</span> odbiorcy wobec cierpienia i autorytetu macierzyństwa.</p>
+
+      <div class="note">W duchu średniowiecznej stylistyki patos nie jest przesadą — to konwencja, która sygnalizuje powagę treści.</div>
+
+      <div class="section"><h2>Konkluzja</h2><div class="subrule"></div></div>
+
+      <p>Wizerunek Matki Dolorosa działa jak ikona: jednocześnie pobożnościowa i społeczna. Łączy prywatny ból z uniwersalnym porządkiem zbawienia, a język utworu nadaje temu doświadczeniu formę, która przetrwała wieki.</p>
+
+      <footer>Opracowanie: kompozycja magazynowa · kolumny, pull‑quote, marginalia i karty motywów.</footer>
+    </section>
+  </main>
+</body>
+</html>

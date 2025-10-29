@@ -23,45 +23,63 @@ function saveJson(file: string, obj: any) {
   }
 }
 
-/** Uodporniony parser odpowiedzi Responses API → tekst wyjściowy */
-function extractText(res: any): string {
-  // 1) skrótowe pole (czasem dostępne)
-  if (res?.output_text && String(res.output_text).trim()) return String(res.output_text).trim();
+/** Rekurencyjne przejście po odpowiedzi: zwróć pierwszy niepusty tekst */
+function dfsFindText(x: any): string | null {
+  if (x == null) return null;
 
-  // 2) standard Responses: res.output: [{ type:'message', content:[{ type:'output_text', text:'...' }, ...] }, ...]
-  const out = res?.output;
-  if (Array.isArray(out)) {
-    for (const item of out) {
-      if (item?.type === 'message' && Array.isArray(item?.content)) {
-        for (const piece of item.content) {
-          if (piece?.type === 'output_text' && typeof piece?.text === 'string' && piece.text.trim()) {
-            return piece.text.trim();
-          }
-          if (typeof piece?.text === 'string' && piece.text.trim()) return piece.text.trim();
-          if (typeof piece?.content === 'string' && piece.content.trim()) return piece.content.trim();
-          if (typeof piece?.output_text === 'string' && piece.output_text.trim()) return piece.output_text.trim();
-        }
-      }
-      // legacy fallback: item.content bez type:'message'
-      const c = (item as any)?.content;
-      if (Array.isArray(c)) {
-        for (const piece of c) {
-          if (piece?.type === 'output_text' && typeof piece?.text === 'string' && piece.text.trim()) {
-            return piece.text.trim();
-          }
-          if (typeof piece?.text === 'string' && piece.text.trim()) return piece.text.trim();
-          if (typeof piece?.content === 'string' && piece.content.trim()) return piece.content.trim();
-          if (typeof piece?.output_text === 'string' && piece.output_text.trim()) return piece.output_text.trim();
+  // proste przypadki
+  if (typeof x === 'string') {
+    const t = x.trim();
+    if (t) return t;
+  }
+  if (typeof x === 'object') {
+    // popularne pola
+    for (const k of ['output_text', 'text', 'content']) {
+      if (typeof x[k] === 'string' && x[k].trim()) return x[k].trim();
+    }
+    // content jako tablica segmentów
+    for (const k of ['content', 'output']) {
+      const v = (x as any)[k];
+      if (Array.isArray(v)) {
+        for (const seg of v) {
+          const got = dfsFindText(seg);
+          if (got) return got;
         }
       }
     }
+    // message wrappery
+    if (x.message) {
+      const got = dfsFindText(x.message);
+      if (got) return got;
+    }
+    // choices (stare API)
+    if (Array.isArray(x.choices) && x.choices.length) {
+      const got = dfsFindText(x.choices[0]);
+      if (got) return got;
+    }
+    // inne pola obiektowe
+    for (const key of Object.keys(x)) {
+      const got = dfsFindText(x[key]);
+      if (got) return got;
+    }
   }
+  if (Array.isArray(x)) {
+    for (const it of x) {
+      const got = dfsFindText(it);
+      if (got) return got;
+    }
+  }
+  return null;
+}
 
-  // 3) bardzo stary fallback (gdyby lib zwrócił choices)
-  const choice = res?.choices?.[0]?.message?.content;
-  if (typeof choice === 'string' && choice.trim()) return choice.trim();
+/** Uodporniony parser odpowiedzi Responses API → tekst wyjściowy */
+function extractText(res: any): string {
+  // szybkie ścieżki
+  if (res?.output_text && String(res.output_text).trim()) return String(res.output_text).trim();
 
-  return '';
+  // rekurencyjny fallback
+  const found = dfsFindText(res);
+  return found ? found.trim() : '';
 }
 
 // --- „luźny” parser JSON (akceptuje code fence’y itp.) ---
@@ -93,7 +111,7 @@ function tryParseJsonLoose<T = any>(txt: string): T {
 
   const m = raw.match(/(\[[\s\S]*\]|\{[\s\S]*\})\s*$/);
   if (m) { try { return JSON.parse(m[1]) as T; } catch {} }
-  throw new Error(`Invalid JSON output. First 120 chars: ${raw.slice(0, 120)}`);
+  throw new Error(`Invalid JSON output. First 160 chars: ${raw.slice(0, 160)}`);
 }
 
 // ───────── Markdown ─────────
@@ -109,21 +127,35 @@ export async function generateMarkdown(prompt: string): Promise<string> {
       const payload: OpenAI.Responses.ResponseCreateParamsNonStreaming = {
         model: Env.openaiModel,
         input: [
-          { role: 'system', content: 'Odpowiadasz wyłącznie tekstem (Markdown lub czysty tekst).' },
+          {
+            role: 'system',
+            content:
+              'Odpowiadasz wyłącznie tekstem (Markdown lub czysty tekst). ' +
+              'Nie zadawaj pytań, nie proś o potwierdzenie, nie dodawaj wstępów ani komentarzy spoza formatu.'
+          },
           { role: 'user', content: prompt },
         ],
         max_output_tokens: 8000,
       };
       saveJson(`${base}.payload.json`, payload);
+
       const res = await client.responses.create(payload);
       saveJson(`${base}.response.json`, res);
+
       const text = extractText(res);
-      if (!text) throw new Error('Empty output (no text extracted)');
+      if (!text) {
+        const hint = `Empty output (no text extracted). Inspect: ${base}.response.json`;
+        fs.writeFileSync(`${base}.error.log`, hint, 'utf8');
+        throw new Error(hint);
+      }
+
       fs.writeFileSync(`${base}.output.md`, text, 'utf8');
       return text.trim();
     } catch (e: any) {
       lastErr = e;
-      fs.writeFileSync(`${base}.error.log`, `${e?.message || e}`, 'utf8');
+      const msg = e?.message || String(e);
+      fs.writeFileSync(`${base}.error.log`, msg, 'utf8');
+      // na 429/5xx robimy 1 retry; inne kody przerywają pętlę
       if (!/429|502|503|504/.test(String(e?.status || e))) break;
     }
   }
@@ -143,21 +175,34 @@ export async function generateJson<T = any>(prompt: string): Promise<T> {
       const payload: OpenAI.Responses.ResponseCreateParamsNonStreaming = {
         model: Env.openaiModel,
         input: [
-          { role: 'system', content: 'Zwracasz WYŁĄCZNIE poprawny JSON (bez code fence’ów i komentarzy).' },
+          {
+            role: 'system',
+            content:
+              'Zwracasz WYŁĄCZNIE poprawny JSON (bez code fence’ów i komentarzy). ' +
+              'Nie zadawaj pytań ani nie proś o potwierdzenie.'
+          },
           { role: 'user', content: prompt },
         ],
         max_output_tokens: 8000,
       };
       saveJson(`${base}.payload.json`, payload);
+
       const res = await client.responses.create(payload);
       saveJson(`${base}.response.json`, res);
+
       const text = extractText(res);
-      if (!text) throw new Error('Empty output (no text extracted)');
+      if (!text) {
+        const hint = `Empty output (no text extracted). Inspect: ${base}.response.json`;
+        fs.writeFileSync(`${base}.error.log`, hint, 'utf8');
+        throw new Error(hint);
+      }
+
       fs.writeFileSync(`${base}.output.txt`, text, 'utf8');
       return tryParseJsonLoose<T>(text);
     } catch (e: any) {
       lastErr = e;
-      fs.writeFileSync(`${base}.error.log`, `${e?.message || e}`, 'utf8');
+      const msg = e?.message || String(e);
+      fs.writeFileSync(`${base}.error.log`, msg, 'utf8');
       if (!/429|502|503|504/.test(String(e?.status || e))) break;
     }
   }
