@@ -8,8 +8,8 @@
     "concepts": "tsx src/index_concepts.ts",
     "sources": "tsx src/index_sources.ts",
     "handbook": "tsx src/index_handbook.ts",
- "handbook:fill": "tsx src/index_handbook_fill.ts",
-  "handbook:seed": "tsx src/index_handbook_seed.ts"
+    "handbook:fill": "tsx src/index_handbook_fill.ts",
+    "handbook:seed": "tsx src/index_handbook_seed.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.4",
@@ -20,6 +20,7 @@
   },
   "devDependencies": {
     "@types/minimist": "^1.2.5",
+    "@types/node": "^24.9.2",
     "tsx": "^4.19.2",
     "typescript": "^5.6.3"
   }
