@@ -1,5 +1,5 @@
-/// <reference types="node" />
 // file: src/index_handbook.ts
+/// <reference types="node" />
 import 'dotenv/config';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -8,6 +8,7 @@ import {
   generateHandbook,
   appendChaptersIndividuallyFromToc,
   parseToc,
+  AppendOpts,
 } from './generation/handbook';
 import {
   findHandbookIdByTitle,
@@ -15,6 +16,7 @@ import {
   insertSlChapter,
   updateSlChapterContentByOrder,
 } from './db/sl_handbooks';
+import { generateAnalysisPack } from './generation/analysis_pack';
 
 function findLatestHandbookFile(): string {
   const dir = path.join('debug', 'handbooks');
@@ -29,15 +31,14 @@ function findLatestHandbookFile(): string {
 
 function findLatestChaptersDir() {
   const mdPath = findLatestHandbookFile();
-  // Uwaga: w regex jest półpauza. To jest w literalnym /.../, więc OK.
-  const h1 = fs.readFileSync(mdPath, 'utf8').match(/^#\s+(.+?)\s+—\s+wersja\s+skrócona/i);
+  const h1 = fs.readFileSync(mdPath, 'utf8').match(/^#\s+(.+?)\s+[—-]\s+wersja\s+skrócona/i);
   const workTitle = h1 ? h1[1].trim() : 'Nieznany tytuł';
   const dir = path.join(path.dirname(mdPath), path.basename(mdPath).replace(/\.md$/i, '') + '.chapters');
   if (!fs.existsSync(dir)) throw new Error(`Brak katalogu z rozdziałami: ${dir}`);
   return { dir, workTitle, mdPath };
 }
 
-/** Seeding: tworzy handbook + rozdziały (tytuł+opis, content=NULL) na podstawie ToC. */
+/** Seed: tworzy handbook + rozdziały (tytuł+opis, content=NULL) na podstawie ToC. */
 async function ensureHandbookSeeded(mdPath: string, workTitle: string): Promise<string> {
   const md = fs.readFileSync(mdPath, 'utf8');
   const hbTitle = `${workTitle} — wersja skrócona`;
@@ -59,7 +60,9 @@ async function ensureHandbookSeeded(mdPath: string, workTitle: string): Promise<
     const { title, description } = toc[i];
     await insertSlChapter({ handbookId, title, description, sortOrder: i, ifNotExists: true });
   }
-  console.log(`Utworzono handbook + ${toc.length} rozdziałów (content pusty).`);
+  await insertSlChapter({ handbookId, title: 'Epilog', description: '', sortOrder: toc.length, ifNotExists: true });
+
+  console.log(`Utworzono handbook + ${toc.length} rozdziałów (+ Epilog) (content pusty).`);
   return handbookId;
 }
 
@@ -67,12 +70,21 @@ async function runGenerate(argv: minimist.ParsedArgs) {
   const work = String(argv.work || '').trim();
   const author = String(argv.author || '').trim();
   const minutes = Number(argv.minutes || 5);
-  const minutesPerChapter = Number(argv.minutesPerChapter || 0.5);
+
+  // Miękki tryb: długość to tylko hint (1.0 min/rozdział)
+  const minutesPerChapter = Number(argv.minutesPerChapter || 1.0);
+
+  const studyNotesMode = (String(argv.studyNotes || 'inline') as AppendOpts['studyNotesMode']);
+  // Domyślnie walidacja OFF (miękko); flaga istnieje dla kompatybilności, ale jest ignorowana po stronie generatora
+  const validate = argv.validate === undefined ? false : String(argv.validate) !== 'false';
+  const force = String(argv.force || 'false') === 'true';
+  const analysis = argv.analysis === undefined ? true : String(argv.analysis) !== 'false';
+
   const from = argv.from ? Number(argv.from) : undefined;
   const to = argv.to ? Number(argv.to) : undefined;
 
   if (!work || !author) {
-    console.error('Użycie: yarn handbook --work "Tytuł" --author "Autor" [--minutes 5] [--minutesPerChapter 0.5] [--from N] [--to M]');
+    console.error('Użycie: yarn handbook --work "Tytuł" --author "Autor" [--minutes 5] [--minutesPerChapter 1.0] [--from N] [--to M] [--studyNotes inline|sidecar|none] [--validate false] [--analysis true|false] [--force true|false]');
     process.exit(1);
   }
 
@@ -80,13 +92,16 @@ async function runGenerate(argv: minimist.ParsedArgs) {
   const res = await generateHandbook({ workTitle: work, author, targetMinutes: minutes });
   console.log('Plik główny:', res.markdownPath);
 
-  console.log('Rozdziały -> pliki (orientacja + przejścia, teraźniejszy)...');
+  console.log('Rozdziały -> pliki (miękki tryb sceniczny; orientacje + przejścia)…');
   const { outDir, written } = await appendChaptersIndividuallyFromToc({
     filePath: res.markdownPath,
     workTitle: work,
     author,
     targetMinutesPerChapter: minutesPerChapter,
     range: from && to ? { from, to } : (from ? { from, to: from } : undefined),
+    studyNotesMode,
+    validate, // przekazujemy dla zgodności, generator i tak pracuje „soft”
+    force,
   });
 
   console.log('Zapisano w:', outDir);
@@ -95,11 +110,26 @@ async function runGenerate(argv: minimist.ParsedArgs) {
     console.log(`  • ${num} ${w.title}`);
   }
   console.log('  • Epilog');
+
+  if (analysis) {
+    console.log('Generuję pakiet maturalny (zbiorczo)…');
+    const tocMd = fs.readFileSync(res.markdownPath, 'utf8');
+    const toc = parseToc(tocMd).map((t, i) => ({ index: i + 1, title: t.title, description: t.description }));
+    const packPath = await generateAnalysisPack({
+      workTitle: work,
+      author,
+      toc,
+      chaptersDir: outDir,
+      outDir: path.dirname(res.markdownPath),
+    });
+    console.log('Pakiet maturalny:', packPath);
+  }
 }
 
 async function runFinish(argv: minimist.ParsedArgs) {
   const chaptersDirArg = argv.chaptersDir ? String(argv.chaptersDir) : '';
   const workTitleArg = argv.work ? String(argv.work) : '';
+  const noEpilog = !!argv.noEpilog;
 
   const { dir, workTitle, mdPath } = chaptersDirArg && workTitleArg
     ? { dir: chaptersDirArg, workTitle: workTitleArg, mdPath: findLatestHandbookFile() }
@@ -129,13 +159,34 @@ async function runFinish(argv: minimist.ParsedArgs) {
     console.log(`  • OK: ${file} -> sort_order=${idx}`);
   }
 
+  // Epilog jako ostatni element (jeśli istnieje plik i nie wyłączono flagą)
+  const epilogPath = path.join(dir, 'epilog.md');
+  if (!noEpilog && fs.existsSync(epilogPath)) {
+    const epilogMd = fs.readFileSync(epilogPath, 'utf8').trim();
+    await insertSlChapter({ handbookId, title: 'Epilog', description: '', sortOrder: files.length, ifNotExists: true });
+    await updateSlChapterContentByOrder({ handbookId, sortOrder: files.length, content: epilogMd });
+    console.log(`  • OK: epilog.md -> sort_order=${files.length}`);
+  }
+
   console.log('Zakończono.');
 }
 
 async function main() {
   const argv = minimist(process.argv.slice(2), {
-    boolean: ['finish'],
-    string: ['work', 'author', 'minutes', 'minutesPerChapter', 'from', 'to', 'chaptersDir'],
+    boolean: ['finish', 'noEpilog'],
+    string: [
+      'work',
+      'author',
+      'minutes',
+      'minutesPerChapter',
+      'from',
+      'to',
+      'chaptersDir',
+      'studyNotes',
+      'validate',
+      'analysis',
+      'force',
+    ],
     alias: { finish: 'f' },
   });
 
