@@ -9,7 +9,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { Env } from '../config/env';
 
-const client = new OpenAI({ apiKey: Env.openaiKey, timeout: 60_000 });
+const client = new OpenAI({ apiKey: Env.openaiKey, timeout: 120_000 });
 
 function ensureDir(dir: string) {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
