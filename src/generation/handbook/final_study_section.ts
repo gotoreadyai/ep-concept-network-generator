@@ -1,5 +1,5 @@
 // file: src/generation/final_study_section.ts
-import { generateMarkdown } from '../llm/openai';
+import { generateMarkdown } from '../../llm/openai';
 
 export type ChapterSummary = {
   index: number;

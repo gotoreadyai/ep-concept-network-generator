@@ -1,5 +1,5 @@
 // file: src/generation/custom_example_generator.ts
-import { generateMarkdown } from '../llm/openai';
+import { generateMarkdown } from '../../llm/openai';
 import { getGenreExample, formatGenreExampleForPrompt } from './genre_examples';
 
 export type CustomExampleInput = {

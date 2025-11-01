@@ -1,7 +1,7 @@
 // file: src/generation/handbook.ts
 import fs from 'node:fs';
 import path from 'node:path';
-import { generateMarkdown } from '../llm/openai';
+import { generateMarkdown } from '../../llm/openai';
 import { planNarrativeStructure, NarrativePlan, ChapterPlan } from './narrative_planner';
 import { generateFinalStudySection, ChapterSummary } from './final_study_section';
 import { detectGenreFromStyle, formatGenreExampleForPrompt, getGenreExample } from './genre_examples';

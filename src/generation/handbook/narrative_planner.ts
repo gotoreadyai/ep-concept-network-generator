@@ -1,5 +1,5 @@
 // file: src/generation/narrative_planner.ts
-import { generateJson } from '../llm/openai';
+import { generateJson } from '../../llm/openai';
 
 export type NarrativeVoice = 'pure_scenes' | 'diary_and_scenes' | 'letters_and_scenes' | 'experimental';
 export type ChapterType = 'scene' | 'diary' | 'letter' | 'monologue' | 'newspaper' | 'found_document';

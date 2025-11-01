@@ -7,9 +7,7 @@
     "plan": "yarn run clean && tsx src/index_plan.ts",
     "concepts": "tsx src/index_concepts.ts",
     "sources": "tsx src/index_sources.ts",
-    "handbook": "tsx src/index_handbook.ts",
-    "handbook:fill": "tsx src/index_handbook_fill.ts",
-    "handbook:seed": "tsx src/index_handbook_seed.ts"
+    "handbook": "tsx src/index_handbook.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.4",

@@ -1,7 +1,7 @@
 // file: src/generation/analysis_pack.ts
 import fs from 'node:fs';
 import path from 'node:path';
-import { generateMarkdown } from '../llm/openai';
+import { generateMarkdown } from '../../llm/openai';
 
 export type AnalysisPackInput = {
   workTitle: string;

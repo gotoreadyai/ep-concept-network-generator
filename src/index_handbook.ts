@@ -8,24 +8,30 @@ import {
   generateHandbook,
   appendChaptersIndividuallyFromToc,
   parseToc,
-  AppendOpts,
   HandbookResult,
-} from './generation/handbook';
+} from './generation/handbook/handbook';
 import {
   findHandbookIdByTitle,
   insertSlHandbook,
   insertSlChapter,
   updateSlChapterContentByOrder,
 } from './db/sl_handbooks';
-import { generateAnalysisPack } from './generation/analysis_pack';
-import { NarrativePlan } from './generation/narrative_planner';
+import { generateAnalysisPack } from './generation/handbook/analysis_pack';
+import { NarrativePlan } from './generation/handbook/narrative_planner';
 
 function findLatestHandbookFile(): string {
   const dir = path.join('debug', 'handbooks');
   if (!fs.existsSync(dir)) throw new Error(`Nie znaleziono katalogu: ${dir}`);
   const files = fs
     .readdirSync(dir)
-    .filter((f) => f.startsWith('handbook-') && f.endsWith('.md') && !f.endsWith('.chapters.md'))
+    .filter(
+      (f) =>
+        f.startsWith('handbook-') &&
+        f.endsWith('.md') &&
+        !f.endsWith('.chapters.md') &&
+        // ✅ nie bierzemy pakietów analitycznych jako bazowego handbooka
+        !f.includes('.analysis.')
+    )
     .map((f) => path.join(dir, f))
     .sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
   if (!files.length) throw new Error('Brak plików handbook-*.md.');
@@ -175,10 +181,18 @@ async function runFinish(argv: minimist.ParsedArgs) {
   const workTitleArg = argv.work ? String(argv.work) : '';
   const noSekcjaMaturalna = !!argv.noSekcjaMaturalna;
 
-  const { dir, workTitle, mdPath } =
+  // ✅ Jeśli użytkownik podał katalog rozdziałów i tytuł dzieła,
+  //    NIE próbujemy wykrywać „najnowszego” handbooka, tylko korzystamy z danych wejściowych.
+  const picked =
     chaptersDirArg && workTitleArg
-      ? { dir: chaptersDirArg, workTitle: workTitleArg, mdPath: findLatestHandbookFile() }
+      ? {
+          dir: chaptersDirArg,
+          workTitle: workTitleArg,
+          mdPath: chaptersDirArg.replace(/\.chapters$/, ''),
+        }
       : findLatestChaptersDir();
+
+  const { dir, workTitle, mdPath } = picked;
 
   const files = fs
     .readdirSync(dir)

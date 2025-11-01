@@ -1,5 +1,5 @@
 // file: src/generation/study_notes.ts
-import { generateMarkdown } from '../llm/openai';
+import { generateMarkdown } from '../../llm/openai';
 
 /** Tryb dołączania notatek do rozdziału. */
 export type StudyNotesMode = 'inline' | 'sidecar' | 'none';
