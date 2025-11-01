@@ -1,8 +1,11 @@
 // file: src/generation/handbook.ts
 import fs from 'node:fs';
 import path from 'node:path';
-import { generateMarkdown, generateJson } from '../llm/openai';
-import { generateStudyNotes, StudyNotesMode } from './study_notes';
+import { generateMarkdown } from '../llm/openai';
+import { planNarrativeStructure, NarrativePlan, ChapterPlan } from './narrative_planner';
+import { generateFinalStudySection, ChapterSummary } from './final_study_section';
+import { detectGenreFromStyle, formatGenreExampleForPrompt, getGenreExample } from './genre_examples';
+import { loadOrGenerateCustomExample } from './custom_example_cache';
 
 export type HandbookInput = {
   workTitle: string;
@@ -14,111 +17,8 @@ export type HandbookInput = {
 
 export type HandbookResult = {
   markdownPath: string;
+  narrativePlan: NarrativePlan;
 };
-
-type GenreStyle = {
-  name: string;
-  narrativeStyle: string;
-  dialogStyle: string;
-  descriptionStyle: string;
-  exampleGood: string;
-  exampleBad: string;
-};
-
-const GENRE_STYLES: Record<string, GenreStyle> = {
-  realism: {
-    name: 'Realizm XIX w.',
-    narrativeStyle: 'Detale codzienności, obserwacja społeczna, konkretne miejsca i czasy',
-    dialogStyle: 'Naturalne rozmowy z gestami i reakcjami; dialog wpleciony w akcję',
-    descriptionStyle: 'Szczegóły ubioru, wnętrz, przedmiotów; światło, dźwięki, zapachy',
-    exampleGood: '– Panie Rzecki! – woła głos z zaplecza. – Gdzie jest ten rachunek?\nRzecki szybko chowa zeszyt pod stertę papierów.\n– Zaraz, panie Wokulski, zaraz...',
-    exampleBad: '**DIALOG**\n– Dzień dobry.\n– Dzień dobry.\n(Bohater jest zmęczony i zamyślony.)'
-  },
-  psychological: {
-    name: 'Realizm psychologiczny',
-    narrativeStyle: 'Wewnętrzne napięcia, obserwacja myśli przez działanie, gesty zdradzające emocje',
-    dialogStyle: 'Podteksty, niedopowiedzenia, przerwy w mówieniu; to co NIE powiedziane jest ważne',
-    descriptionStyle: 'Detale pokazujące stan wewnętrzny: drżące ręce, pot, unikanie wzroku',
-    exampleGood: '– Czy pan... – Raskolnikow przerywa. Patrzy na własne dłonie.\n– Czy pan widział? – pyta w końcu starzec.\nRaskolnikow milczy. Słychać tykanie zegara.',
-    exampleBad: 'Raskolnikow czuje wyrzuty sumienia i jest rozdarty wewnętrznie. Myśli o zbrodni.'
-  },
-  fantasy: {
-    name: 'Fantasy/Przygoda',
-    narrativeStyle: 'Dynamiczna akcja, magia jako element rzeczywistości, rytm scen akcji i dialogu',
-    dialogStyle: 'Żywe, często szybkie wymiany; reakcje natychmiastowe; humor lub napięcie',
-    descriptionStyle: 'Detale magiczne, niezwykłe stworzenia, zaklęcia - ale konkretnie, nie ogólnie',
-    exampleGood: '– Expelliarmus! – krzyczy Harry.\nRóżdżka Malfoya wystrzeliwuje w powietrze. Draco cofa się, potyka o krzesło.\n– Oddaj to! – syka.',
-    exampleBad: 'Harry używa zaklęcia i wygrywa pojedynek. Czuje satysfakcję i dumę ze swojej magii.'
-  },
-  modernist: {
-    name: 'Modernizm/Egzystencjalizm',
-    narrativeStyle: 'Fragmentaryczność, absurd codzienności, powtórzenia, monotonia lub chaos',
-    dialogStyle: 'Często bezcelowe rozmowy, powtórzenia, brak logicznej progresji',
-    descriptionStyle: 'Detale codzienności nabierające dziwności; zwykłe rzeczy opisane precyzyjnie i obco',
-    exampleGood: 'Gregor leży na plecach. Widzi sufit. Sufit jest biały. Słyszy kroki za drzwiami.\n– Gregor? – woła matka. – Gregor?\nNie odpowiada. Nie może.',
-    exampleBad: 'Gregor czuje się wyobcowany i nie rozumie swojej metamorfozy. Jest w kryzysie egzystencjalnym.'
-  },
-  romantic: {
-    name: 'Romantyzm',
-    narrativeStyle: 'Emocje przez działanie, natura jako tło, wielkie gesty i konflikty',
-    dialogStyle: 'Patetyczne, ale konkretne; przysięgi, oskarżenia, wyznania - przez działanie',
-    descriptionStyle: 'Przyroda, burze, księżyc, ruiny - ale pokazane konkretnymi obrazami',
-    exampleGood: 'Konrad unosi ręce do nieba. Wiatr szarpie jego płaszcz.\n– Oskarżam! – krzyczy w ciemność.\nGrom odpowiada mu echem w górach.',
-    exampleBad: 'Konrad przeżywa głęboki kryzys duchowy i buntuje się przeciwko Bogu w sposób romantyczny.'
-  }
-};
-
-/** Auto-detekcja gatunku na podstawie tytułu i autora */
-async function detectGenre(workTitle: string, author: string): Promise<keyof typeof GENRE_STYLES> {
-  const prompt = {
-    instruction: `Określ gatunek literacki dzieła na podstawie tytułu i autora. Zwróć JSON.`,
-    work: workTitle,
-    author: author,
-    availableGenres: Object.keys(GENRE_STYLES),
-    outputFormat: {
-      genre: 'jedna z: realism, psychological, fantasy, modernist, romantic',
-      confidence: 'liczba 0-100',
-      reasoning: 'krótkie uzasadnienie (1 zdanie)'
-    }
-  };
-
-  try {
-    const result = await generateJson<{ genre: string; confidence: number; reasoning: string }>(
-      JSON.stringify(prompt, null, 2)
-    );
-    
-    const detectedGenre = result.genre.toLowerCase();
-    
-    // Jeśli AI zwróciło poprawny gatunek i ma wysoką pewność
-    if (GENRE_STYLES[detectedGenre] && result.confidence > 60) {
-      console.log(`🎭 Wykryto gatunek: ${GENRE_STYLES[detectedGenre].name} (${result.confidence}%) - ${result.reasoning}`);
-      return detectedGenre as keyof typeof GENRE_STYLES;
-    }
-  } catch (err) {
-    console.warn('⚠️  Auto-detekcja gatunku nie powiodła się, używam domyślnego (realism)');
-  }
-
-  // Fallback: prosta heurystyka
-  const lowerTitle = workTitle.toLowerCase();
-  const lowerAuthor = author.toLowerCase();
-
-  if (lowerAuthor.includes('dostojewski') || lowerAuthor.includes('kafka') || lowerAuthor.includes('camus')) {
-    return 'psychological';
-  }
-  if (lowerAuthor.includes('rowling') || lowerAuthor.includes('tolkien') || lowerAuthor.includes('sapkowski') ||
-      lowerTitle.includes('harry') || lowerTitle.includes('potter') || lowerTitle.includes('wiedźmin')) {
-    return 'fantasy';
-  }
-  if (lowerAuthor.includes('mickiewicz') || lowerAuthor.includes('słowacki') || lowerTitle.includes('dziady')) {
-    return 'romantic';
-  }
-  if (lowerAuthor.includes('kafka') || lowerTitle.includes('proces') || lowerTitle.includes('przemiana')) {
-    return 'modernist';
-  }
-
-  // Domyślnie realism (bezpieczny wybór dla polskiej literatury XIX w.)
-  return 'realism';
-}
 
 function clamp(n: number, a: number, b: number) {
   return Math.max(a, Math.min(b, n));
@@ -135,14 +35,16 @@ function unwrapCodeFence(s: string) {
 function slugifyPolish(s: string) {
   return s
     .toLowerCase()
-    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
-    .replace(/[ąćęłńóśźż]/g, (c) => ({ 'ą':'a','ć':'c','ę':'e','ł':'l','ń':'n','ó':'o','ś':'s','ź':'z','ż':'z' } as any)[c] || c)
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[ąćęłńóśźż]/g, (c) =>
+      ({ ą: 'a', ć: 'c', ę: 'e', ł: 'l', ń: 'n', ó: 'o', ś: 's', ź: 'z', ż: 'z' } as any)[c] || c
+    )
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/(^-|-$)/g, '')
     .slice(0, 120);
 }
 
-/** 🔎 Parser spisu treści: zbiera {title, description} z sekcji "## Spis treści". */
 export function parseToc(md: string): Array<{ title: string; description: string }> {
   const lines = md.split('\n');
   const items: Array<{ title: string; description: string }> = [];
@@ -150,7 +52,10 @@ export function parseToc(md: string): Array<{ title: string; description: string
 
   for (const raw of lines) {
     const line = raw.trim();
-    if (/^##\s*Spis\s+treści\s*$/i.test(line)) { inToc = true; continue; }
+    if (/^##\s*Spis\s+treści\s*$/i.test(line)) {
+      inToc = true;
+      continue;
+    }
     if (!inToc) continue;
     if (!line) continue;
     if (line.startsWith('```')) break;
@@ -168,7 +73,6 @@ export function parseToc(md: string): Array<{ title: string; description: string
   return items;
 }
 
-/** Usuwa etykiety typu [Miejsce: X; pora: Y; kto: Z] → *[X; Y; Z]* i czyści drobne artefakty. */
 function sanitizeOrientation(md: string) {
   let out = md.replace(
     /\[(?:Miejsce|miejsce)\s*:\s*([^;\]]+);\s*(?:pora|czas)\s*:\s*([^;\]]+);\s*(?:kto|bohaterowie)\s*:\s*([^\]]+)\]/g,
@@ -179,7 +83,6 @@ function sanitizeOrientation(md: string) {
   return out;
 }
 
-/** „Miękka" sanityzacja: bez twardej walidacji; tylko delikatne poprawki formatów. */
 function softSanitize(md: string) {
   let out = md.replace(/\r/g, '');
   out = out.replace(/\bPrzejścia:/g, '*Przejście:*').replace(/(^|\n)Przejście:/g, '$1*Przejście:*');
@@ -188,70 +91,47 @@ function softSanitize(md: string) {
   return out.trim() + '\n';
 }
 
-/** Monolit: ToC + rozdziały do jednego pliku (bez DB). */
 export async function generateHandbook(input: HandbookInput): Promise<HandbookResult> {
   const targetMinutes = clamp(Math.round(input.targetMinutes ?? 5), 3, 8);
   const desiredChapters = clamp(Math.round(input.desiredChapters ?? 12), 10, 15);
   const outDir = input.outDir || path.join('debug', 'handbooks');
   ensureDir(outDir);
 
-  // Auto-detekcja gatunku
-  const genre = await detectGenre(input.workTitle, input.author);
-  const style = GENRE_STYLES[genre];
+  console.log(`🎭 Faza 1: Planowanie struktury narracyjnej...`);
+  const narrativePlan = await planNarrativeStructure(input.workTitle, input.author, desiredChapters);
 
   const prompt = [
     `Zwróć WYŁĄCZNIE czysty Markdown (bez code fence'ów).`,
-    `Tworzysz narracyjny skrót dzieła "${input.workTitle}" — ${input.author}.`,
     ``,
-    `═══════════════════════════════════════════════════════════════`,
-    `STYL NARRACJI (${style.name})`,
-    `═══════════════════════════════════════════════════════════════`,
+    `DZIEŁO: "${input.workTitle}" — ${input.author}`,
     ``,
-    `✓ NARRACJA: ${style.narrativeStyle}`,
-    `✓ DIALOGI: ${style.dialogStyle}`,
-    `✓ OPISY: ${style.descriptionStyle}`,
+    `STRUKTURA NARRACYJNA (już ustalona):`,
+    `- Voice: ${narrativePlan.narrativeVoice}`,
+    `- Style: ${narrativePlan.styleInspiration}`,
+    `- Tone: ${narrativePlan.overallTone}`,
     ``,
-    `✓ UNIWERSALNE ZASADY:`,
-    `  • Czas teraźniejszy, trzecia osoba`,
-    `  • SHOW DON'T TELL - pokazuj, nie opisuj`,
-    `  • Immersyjny, filmowy - akcja w ruchu`,
-    `  • ZERO analiz, metafor, ocen moralnych`,
-    `  • ZERO oznaczeń technicznych (typu "**DIALOG**")`,
+    `ZADANIE: Napisz wstęp + spis treści dla ${desiredChapters} rozdziałów.`,
     ``,
-    `PRZYKŁAD DOBRY dla tego gatunku:`,
-    style.exampleGood,
-    ``,
-    `PRZYKŁAD ZŁY (NIE TAK):`,
-    style.exampleBad,
-    ``,
-    `═══════════════════════════════════════════════════════════════`,
-    ``,
+    `FORMAT:`,
     `# ${input.workTitle} — wersja skrócona`,
     ``,
-    `(Napisz 1 akapit immersyjnego wprowadzenia do świata przedstawionego - jak scenografia teatralna lub pierwsze ujęcie filmu. Konkretne obrazy, nie abstrakcje.)`,
+    `(1 akapit immersyjnego wprowadzenia - jak pierwsze ujęcie filmu, konkretne obrazy)`,
     ``,
     `## Spis treści`,
     ``,
-    `(${desiredChapters} rozdziałów w formacie:)`,
-    `- 1. **<Tytuł rozdziału>** — [miejsce; czas; kto]; 1-2 zdania streszczenia akcji (co się dzieje, nie analizy)`,
-    ``,
-    `PRZYKŁAD dobrego wpisu:`,
-    `- 1. **Sklep na Krakowskim Przedmieściu** — [sklep Wokulskiego; sierpień 1878, ranek; Wokulski, Rzecki]; Wokulski wraca do sklepu po nieudanym spotkaniu. Rzecki obserwuje jego zmianę.`,
-    ``,
-    `ZŁE przykłady (NIE TAK):`,
-    `- "Przedstawienie głównego bohatera" (za ogólne)`,
-    `- "Konflikt wewnętrzny protagonisty" (analiza, nie akcja)`,
-    `- "Bohater staje przed wyborem" (abstrakcja bez konkretów)`,
-    ``,
-    `---`,
-    ``,
-    `## Rozdział 1: <Tytuł>`,
-    `*[Miejsce; czas; kto]*`,
-    ``,
-    `(Ta sekcja jest placeholder - treść rozdziałów powstanie później)`,
-    ``,
-    `## Epilog`,
-    `(1-3 zdania zamykające akcję; konkretny obraz końcowy, nie morał)`,
+    narrativePlan.chapters
+      .map((ch) => {
+        const typeLabel =
+          ch.type === 'diary'
+            ? '[dziennik]'
+            : ch.type === 'letter'
+            ? '[list]'
+            : ch.type === 'monologue'
+            ? '[monolog]'
+            : '';
+        return `- ${ch.index}. **${ch.title}** ${typeLabel} — ${ch.description}`;
+      })
+      .join('\n'),
   ].join('\n');
 
   const raw = await generateMarkdown(prompt);
@@ -265,165 +145,438 @@ export async function generateHandbook(input: HandbookInput): Promise<HandbookRe
   const mdPath = path.join(outDir, `handbook-${safeTitle}-${ts}.md`);
   fs.writeFileSync(mdPath, cleaned + '\n', 'utf8');
 
-  return { markdownPath: mdPath };
+  const planPath = mdPath.replace(/\.md$/, '.plan.json');
+  fs.writeFileSync(planPath, JSON.stringify(narrativePlan, null, 2), 'utf8');
+  console.log(`📋 Plan narracyjny: ${planPath}`);
+
+  return { markdownPath: mdPath, narrativePlan };
 }
 
 export type AppendOpts = {
-  studyNotesMode?: StudyNotesMode;
-  validate?: boolean;
   force?: boolean;
   range?: { from: number; to: number };
   outDir?: string;
+  narrativePlan?: NarrativePlan;
 };
 
-/** Rozdział po rozdziale → pliki + (opcjonalnie) notatki (miękki tryb scenic). */
+function extractKeyEvents(chapterMd: string): string[] {
+  const sentences = chapterMd
+    .replace(/^##.+$/gm, '')
+    .replace(/\*\[.+?\]\*/g, '')
+    .split(/[.!?]+/)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 20 && s.length < 200);
+
+  const first3 = sentences.slice(0, 3);
+  const last2 = sentences.slice(-2);
+  return [...first3, ...last2].filter(Boolean);
+}
+
+async function generateChapterWithContext(args: {
+  workTitle: string;
+  author: string;
+  chapterPlan: ChapterPlan;
+  narrativePlan: NarrativePlan;
+  previousChapters: Array<{ index: number; title: string; keyEvents: string[] }>;
+  nextChapterTitle?: string;
+  targetMinutes: number;
+  mdPath: string;
+}): Promise<string> {
+  const { workTitle, author, chapterPlan, narrativePlan, previousChapters, nextChapterTitle, targetMinutes, mdPath } =
+    args;
+
+  const wordsTarget = Math.round(targetMinutes * 160);
+
+  // Wykryj gatunek i załaduj przykłady
+  const detectedGenre = detectGenreFromStyle(narrativePlan.styleInspiration, narrativePlan.overallTone);
+  console.log(`   🎭 Gatunek: ${detectedGenre}`);
+
+  const genreExample = getGenreExample(detectedGenre);
+  if (!genreExample) {
+    throw new Error(`Nieznany gatunek: ${detectedGenre}`);
+  }
+  const genrePrompt = formatGenreExampleForPrompt(genreExample);
+
+  // Wczytaj lub wygeneruj custom przykład (z cache)
+  const customExample = await loadOrGenerateCustomExample({
+    workTitle,
+    author,
+    genre: detectedGenre,
+    styleInspiration: narrativePlan.styleInspiration,
+    mdPath,
+  });
+
+  const typeInstructions: Record<string, string> = {
+    scene: [
+      `═══════════════════════════════════════════════════════════════`,
+      `TYP: SCENA (obiektywna narracja, trzecia osoba)`,
+      `═══════════════════════════════════════════════════════════════`,
+      ``,
+      `KRYTYCZNE ZASADY IMMERSJI:`,
+      ``,
+      `1. 70% DIALOGU, 30% OPISU`,
+      `   - Dialog prowadzi akcję, opis tylko między wymianami`,
+      `   - Każda scena = głównie rozmowy postaci`,
+      ``,
+      `2. KRÓTKIE KWESTIE (1-2 zdania MAX)`,
+      `   - Ludzie mówią krótko, zwłaszcza gdy są zdenerwowani`,
+      `   - Długie tyrady = nienaturalne`,
+      ``,
+      `3. GRUPUJ DIALOG - NIE PRZEPLATAJ KAŻDEJ KWESTII OPISEM`,
+      `   ❌ ZŁE (uderzanie kijem po głowie):`,
+      `   "– Kwestia 1.`,
+      `   Opis gestu 1.`,
+      `   – Kwestia 2.`,
+      `   Opis gestu 2.`,
+      `   – Kwestia 3.`,
+      `   Opis gestu 3."`,
+      `   `,
+      `   ✅ DOBRE (naturalny rytm):`,
+      `   "– Kwestia 1.`,
+      `   – Kwestia 2.`,
+      `   – Kwestia 3.`,
+      `   `,
+      `   Gest/reakcja (1-2 zdania).`,
+      `   `,
+      `   – Kwestia 4.`,
+      `   – Kwestia 5."`,
+      `   `,
+      `   ZASADA: 3-5 kwestii dialogu → POTEM gest/opis (jeśli potrzebny)`,
+      ``,
+      `4. PRZERWY W DIALOGU = GESTY/REAKCJE (ale RZADKO!)`,
+      `   - Tylko gdy coś WAŻNEGO się dzieje`,
+      `   - Nie po każdej kwestii!`,
+      ``,
+      `5. NIEDOPOWIEDZENIA, JĄKANIE, PRZERWY`,
+      `   - "– Ale wie pan... nasze różnice..."`,
+      `   - "– Chciałem... chciałem z panem porozmawiać."`,
+      `   - Pokazuje niepewność, dyskomfort`,
+      ``,
+      `6. CISZA = NAPIĘCIE`,
+      `   - Oznaczaj ją wprost: "Cisza. Długa, ciężka cisza."`,
+      `   - Albo przez akcję: "Nikt nie odpowiada. Ktoś odkłada filiżankę."`,
+      `   - Używaj RZADKO (MAX 2 razy na scenę!)`,
+      ``,
+      `7. GESTY ZAMIAST OPISÓW EMOCJI`,
+      `   ❌ NIE: "Był zdenerwowany"`,
+      `   ✅ TAK: "Krztusi się. Poprawia kołnierz."`,
+      `   `,
+      `   ❌ NIE: "Czuła się nieswojo"`,
+      `   ✅ TAK: "Przestaje grać. Wstaje."`,
+      ``,
+      `8. REAKCJE FIZYCZNE = EMOCJE (GRUPUJ!)`,
+      `   - Po 3-5 kwestiach dialogu: 1-2 zdania akcji`,
+      `   - przestaje grać, wstaje, patrzy w okno, odwraca głowę`,
+      `   - krztusi się, zaciska pięści, unika wzroku`,
+      `   - odkłada przedmiot, poprawia ubranie, wychodzi`,
+      ``,
+      `9. NIE PISZ META-KOMENTARZY O DIALOGU`,
+      `   ❌ ZŁE (bezsensowne ozdobniki):`,
+      `   "Kilka krótkich zdań jedno po drugim."`,
+      `   "Głosy podnoszą się, mieszają."`,
+      `   "Krótko, jeden po drugim."`,
+      `   "Kilka osób szepcze równocześnie, głosy nisko splecione."`,
+      `   `,
+      `   ✅ DOBRE:`,
+      `   Po prostu pisz dialog! Jeśli chaos - pokaż przez nakładające się kwestie:`,
+      `   "– Kwestia 1?`,
+      `   – Nieprawda!`,
+      `   – A kto pana pytał?`,
+      `   `,
+      `   Kilka osób mówi równocześnie."`,
+      ``,
+      `10. PAUZY MIĘDZY DIALOGIEM TYLKO GDY:`,
+      `    - Zmiana tematu/tonu (ważna!)`,
+      `    - Cisza = napięcie (MAX 2 razy na scenę!)`,
+      `    - Fizyczna akcja (wstaje, wychodzi, coś upada)`,
+      `    `,
+      `    ❌ NIE wstawiaj jednozdaniowych "ozdobników":`,
+      `    "Kilka osób szepcze równocześnie, głosy nisko splecione." ← ZŁE!`,
+      `    `,
+      `    ✅ Jeśli pauza - musi mieć cel:`,
+      `    "Wstaje od stołu. Podchodzi do okna." ← OK (fizyczna akcja)`,
+      `    "Cisza. Długa, ciężka cisza." ← OK (napięcie, ale max 2x!)`,
+      ``,
+      `═══════════════════════════════════════════════════════════════`,
+      `PRZYKŁAD DOBREGO RYTMU:`,
+      ``,
+      `"– Wie pan – zaczyna ojciec – nasze nazwisko...`,
+      `– Rozumiem.`,
+      `– Ludzie gadają.`,
+      `– Wiem.`,
+      ``,
+      `Córka wstaje od fortepianu. Podchodzi do matki.`,
+      ``,
+      `– Źle się czuję. Pójdę do siebie.`,
+      `– Już, kochanie?`,
+      `– Przepraszam.`,
+      ``,
+      `Wychodzi z salonu."`,
+      ``,
+      `DLACZEGO TO DZIAŁA:`,
+      `✓ 4 kwestie → gest (ważny!) → 3 kwestie → gest finałowy`,
+      `✓ Dialog PŁYNIE, nie jest przerywany co linijkę`,
+      `✓ Gesty ZNACZĄCE (wstaje, wychodzi) nie dekoracyjne`,
+      `✓ ZERO meta-komentarzy typu "głosy się mieszają"`,
+      ``,
+      `═══════════════════════════════════════════════════════════════`,
+      genrePrompt,
+      ``,
+      `═══════════════════════════════════════════════════════════════`,
+      `TWÓJ CUSTOM PRZYKŁAD (dla tego dzieła - WZÓR STYLU):`,
+      `═══════════════════════════════════════════════════════════════`,
+      ``,
+      customExample,
+      ``,
+      `═══════════════════════════════════════════════════════════════`,
+      `TERAZ PISZ SWOJĄ SCENĘ używając:`,
+      `- Struktury z przykładu gatunkowego (proporcje, rytm)`,
+      `- Stylu z custom przykładu (ton, atmosfera)`,
+      `- Postaci i sytuacji z TWOJEGO rozdziału (nie kopiuj!)`,
+      ``,
+      `KLUCZOWE: GRUPUJ DIALOG! 3-5 kwestii razem, POTEM gest!`,
+      `ZERO meta-komentarzy! ZERO jednozdaniowych ozdobników!`,
+      `═══════════════════════════════════════════════════════════════`,
+    ].join('\n'),
+
+    diary: [
+      `TYP: DZIENNIK (pierwsza osoba: ${chapterPlan.povCharacter || 'narrator'})`,
+      ``,
+      `ZASADY:`,
+      `- Intymny ton, osobiste refleksje`,
+      `- Data na początku: "15 sierpnia 1878:" lub "Dziś..."`,
+      `- Pokazuj emocje przez OBSERWACJE, nie abstrakcje`,
+      `  ❌ NIE: "Byłem bardzo smutny"`,
+      `  ✅ TAK: "Widziałem jak stał dłużej przy oknie. Nie jadł."`,
+      `- Możesz cytować dialogi które zapamiętałeś`,
+      `  "Zapytałem: 'Co się stało?'"`,
+      `  "Odpowiedział: 'Nic.'"`,
+      `  "Ale widziałem – coś się stało."`,
+      `- Krótkie akapity (jak prawdziwy dziennik)`,
+      `- Czas przeszły LUB teraźniejszy (w stylu dziennika)`,
+    ].join('\n'),
+
+    letter: [
+      `TYP: LIST (pierwsza osoba: ${chapterPlan.povCharacter || 'autor listu'})`,
+      ``,
+      `ZASADY:`,
+      `- KRÓTKI (10-15 linijek MAX)`,
+      `- Format: "Szanowny Panie, ..." / "Drogi [imię], ..."`,
+      `- DWUZNACZNY - coś mówi, coś ukrywa`,
+      `- Powinien COŚ BOLEĆ czytelnika`,
+      `  Np. uprzejme odrzucenie, chłodny dystans`,
+      `- Koniec: podpis`,
+      ``,
+      `PRZYKŁAD TONU:`,
+      `"Dziękuję za wizytę. Była... pouczająca.`,
+      `Proszę jednak pamiętać o różnicach, które nas dzielą.`,
+      `Z wyrazami szacunku, [imię]"`,
+      ``,
+      `(to brzmi uprzejmie, ale BOLI - właśnie o to chodzi!)`,
+    ].join('\n'),
+
+    monologue: [
+      `TYP: MONOLOG WEWNĘTRZNY (pierwsza osoba)`,
+      ``,
+      `ZASADY:`,
+      `- Strumień myśli - fragmentaryczny, emocjonalny`,
+      `- Może być chaotyczny (jak prawdziwe myśli)`,
+      `- Pokazuj przez wspomnienia konkretnych scen`,
+      `  ❌ NIE: "Czułem się samotny"`,
+      `  ✅ TAK: "Pamiętam jak stała przy instrumencie. Nie patrzyła na mnie."`,
+      `- Pytania retoryczne OK`,
+      `- Niedokończone myśli OK`,
+      `- EMOCJE przez detale, nie nazwy emocji`,
+    ].join('\n'),
+
+    newspaper: [
+      `TYP: ARTYKUŁ GAZETOWY / DOKUMENT`,
+      ``,
+      `ZASADY:`,
+      `- Oficjalny, suchy ton (kontrast z emocjami w scenach!)`,
+      `- Format: Tytuł, Podtytuł, Lead, Treść`,
+      `- KRÓTKI - gazeta nie pisze eposów`,
+      `- Może zawierać plotki, domysły (to gazeta!)`,
+      `- Używaj do przekazania kontekstu społecznego`,
+    ].join('\n'),
+
+    found_document: [
+      `TYP: ZNALEZIONY DOKUMENT (księga rachunkowa, telegram, notatka)`,
+      ``,
+      `ZASADY:`,
+      `- AUTENTYCZNY FORMAT (jak prawdziwy dokument)`,
+      `- Krótki, fragmentaryczny`,
+      `- Liczby, daty, suche fakty`,
+      `- Emocje pokazane PRZEZ LICZBY`,
+      `  Np. "200 zł pożyczka" (pokazuje obsesję bez słów)`,
+    ].join('\n'),
+  };
+
+  const contextSummary =
+    previousChapters.length > 0
+      ? [
+          ``,
+          `═══════════════════════════════════════════════════════════════`,
+          `KONTEKST: CO BYŁO WCZEŚNIEJ (MUSISZ nawiązać!)`,
+          `═══════════════════════════════════════════════════════════════`,
+          ``,
+          ...previousChapters.map(
+            (prev) =>
+              `Rozdział ${prev.index}: ${prev.title}\n${prev.keyEvents.map((e) => `- ${e}`).join('\n')}\n`
+          ),
+          ``,
+          `KRYTYCZNE:`,
+          `- Twój rozdział MUSI nawiązywać do tych wydarzeń`,
+          `- Postacie PAMIĘTAJĄ co się stało`,
+          `- Czas i miejsca są CIĄGŁE`,
+          `- Jeśli w Ch${previousChapters[previousChapters.length - 1]?.index} było napięcie,`,
+          `  Twój rozdział musi to KONTYNUOWAĆ lub ROZWIĄZAĆ`,
+          ``,
+        ].join('\n')
+      : '';
+
+  const instructionType = chapterPlan.type as keyof typeof typeInstructions;
+  const instruction = typeInstructions[instructionType] || typeInstructions.scene;
+
+  const prompt = [
+    `Zwróć WYŁĄCZNIE czysty Markdown (bez code fence'ów).`,
+    ``,
+    `DZIEŁO: "${workTitle}" — ${author}`,
+    `ROZDZIAŁ ${chapterPlan.index}: ${chapterPlan.title}`,
+    `Streszczenie: ${chapterPlan.description}`,
+    ``,
+    `STRUKTURA NARRACYJNA (ustalona):`,
+    `- Voice: ${narrativePlan.narrativeVoice}`,
+    `- Style: ${narrativePlan.styleInspiration}`,
+    `- Overall Tone: ${narrativePlan.overallTone}`,
+    `- Chapter Tone: ${chapterPlan.tone || narrativePlan.overallTone}`,
+    ``,
+    contextSummary,
+    ``,
+    instruction,
+    ``,
+    `═══════════════════════════════════════════════════════════════`,
+    `DŁUGOŚĆ I STRUKTURA`,
+    `═══════════════════════════════════════════════════════════════`,
+    ``,
+    `CEL: ~${targetMinutes} minut czytania (${wordsTarget} słów)`,
+    ``,
+    `STRUKTURA ROZDZIAŁU:`,
+    `## Rozdział ${chapterPlan.index}: ${chapterPlan.title}`,
+    chapterPlan.type === 'scene' ? `*[${chapterPlan.description.split(';').slice(0, 3).join('; ')}]*\n` : '',
+    `(2-3 zdania wprowadzenia - konkretny obraz miejsca/sytuacji)`,
+    ``,
+    `(TERAZ GŁÓWNA CZĘŚĆ - pamiętaj: 70% dialogu, GRUPUJ kwestie!)`,
+    ``,
+    nextChapterTitle ? `*Przejście:* ${nextChapterTitle}` : `(Zamknij rozdział bez zapowiedzi)`,
+    ``,
+    `═══════════════════════════════════════════════════════════════`,
+    `OSTATNIE PRZYPOMNIENIE - TO NAJWAŻNIEJSZE:`,
+    ``,
+    chapterPlan.type === 'scene'
+      ? [
+          `✓ 70% DIALOGU (rozmowy prowadzą akcję)`,
+          `✓ Krótkie kwestie (1-2 zdania)`,
+          `✓ GRUPUJ dialog: 3-5 kwestii → POTEM gest`,
+          `✓ NIE przeplataj każdej kwestii opisem (to uderzanie kijem!)`,
+          `✓ ZERO meta-komentarzy ("głosy się mieszają" etc.)`,
+          `✓ ZERO jednozdaniowych ozdobników`,
+          `✓ Cisza = napięcie (ale MAX 2 razy!)`,
+          `✓ Gesty zamiast "był smutny"`,
+          `✓ EMOCJE przez akcję, nie opisy`,
+          ``,
+          `WZORUJ SIĘ NA PRZYKŁADACH POWYŻEJ - zwróć uwagę na RYTM!`,
+        ].join('\n')
+      : `Pisz zgodnie z typem: ${chapterPlan.type}`,
+    `═══════════════════════════════════════════════════════════════`,
+  ].join('\n');
+
+  let md = unwrapCodeFence(await generateMarkdown(prompt));
+
+  if (!/^##\s+Rozdział\s+\d+:/m.test(md)) {
+    md = `## Rozdział ${chapterPlan.index}: ${chapterPlan.title}\n${md}\n`;
+  }
+
+  return softSanitize(md);
+}
+
 export async function appendChaptersIndividuallyFromToc(args: {
   filePath: string;
   workTitle: string;
   author: string;
   targetMinutesPerChapter?: number;
-} & AppendOpts): Promise<{ outDir: string; written: Array<{ index: number; title: string; path: string }> }> {
-  const src = fs.readFileSync(args.filePath, 'utf8').replace(/\r/g, '');
-  const toc = parseToc(src);
-  if (!toc.length) throw new Error('Brak spisu treści.');
-
+  narrativePlan: NarrativePlan;
+} & AppendOpts): Promise<{
+  outDir: string;
+  written: Array<{ index: number; title: string; path: string }>;
+}> {
   const baseName = path.basename(args.filePath).replace(/\.md$/i, '');
   const baseOut = args.outDir || path.join(path.dirname(args.filePath), `${baseName}.chapters`);
   ensureDir(baseOut);
 
-  const wordsHint = Math.round((args.targetMinutesPerChapter ?? 1.0) * 160);
-
-  // Auto-detekcja gatunku
-  const genre = await detectGenre(args.workTitle, args.author);
-  const style = GENRE_STYLES[genre];
+  const targetMinutes = args.targetMinutesPerChapter ?? 5.0;
 
   const results: Array<{ index: number; title: string; path: string }> = [];
+  const chapterSummaries: ChapterSummary[] = [];
+  const previousChapters: Array<{ index: number; title: string; keyEvents: string[] }> = [];
+
   const from = Math.max(1, args.range?.from ?? 1);
-  const to = Math.min(toc.length, args.range?.to ?? toc.length);
+  const to = Math.min(args.narrativePlan.chapters.length, args.range?.to ?? args.narrativePlan.chapters.length);
+
+  console.log(`\n📖 Generuję rozdziały ${from}-${to} z kontekstem i emocjami...`);
 
   for (let i = from; i <= to; i++) {
-    const ch = toc[i - 1];
-    const next = i < toc.length ? toc[i] : null;
-    const nextTitle = next ? next.title : '';
+    const chapterPlan = args.narrativePlan.chapters[i - 1];
+    const nextChapter = i < args.narrativePlan.chapters.length ? args.narrativePlan.chapters[i] : null;
 
-    const prompt = [
-      `Zwróć WYŁĄCZNIE czysty Markdown (bez code fence'ów).`,
-      ``,
-      `DZIEŁO: "${args.workTitle}" — ${args.author}`,
-      `ROZDZIAŁ ${i}: ${ch.title}`,
-      `STRESZCZENIE: ${ch.description}`,
-      ``,
-      `═══════════════════════════════════════════════════════════════`,
-      `STYL NARRACJI (${style.name})`,
-      `═══════════════════════════════════════════════════════════════`,
-      ``,
-      `✓ NARRACJA: ${style.narrativeStyle}`,
-      `✓ DIALOGI: ${style.dialogStyle}`,
-      `✓ OPISY: ${style.descriptionStyle}`,
-      ``,
-      `✓ UNIWERSALNE ZASADY:`,
-      `  • Czas teraźniejszy, trzecia osoba`,
-      `  • SHOW DON'T TELL:`,
-      `    - NIE: "jest zmęczony" → TAK: "ma podkrążone oczy"`,
-      `    - NIE: "jest zdenerwowany" → TAK: "zaciska pięści"`,
-      `    - NIE: "myśli o niej" → TAK: "patrzy przez okno w stronę pałacu"`,
-      `  • Immersyjny, filmowy - akcja w ruchu, nie statyczne opisy`,
-      `  • ZERO analiz psychologicznych, metafor, ocen moralnych`,
-      `  • ZERO oznaczeń technicznych (typu "**DIALOG — blok nieprzerwany**")`,
-      ``,
-      `✓ DIALOGI NATURALNE wplecione w akcję:`,
-      `  • Każda kwestia poprzedzona "–" (półpauza)`,
-      `  • Między wypowiedziami: gesty, reakcje, ruch`,
-      `  • Dialog prowadzi akcję, NIE jest jej przerwą`,
-      ``,
-      `PRZYKŁAD DOBRY dla tego gatunku:`,
-      style.exampleGood,
-      ``,
-      `PRZYKŁAD ZŁY (NIE TAK):`,
-      style.exampleBad,
-      ``,
-      `═══════════════════════════════════════════════════════════════`,
-      `STRUKTURA ROZDZIAŁU`,
-      `═══════════════════════════════════════════════════════════════`,
-      ``,
-      `## Rozdział ${i}: ${ch.title}`,
-      `*[${ch.description.split(';').slice(0, 3).join('; ')}]*`,
-      ``,
-      `(2-4 zdania wprowadzające - konkretny obraz miejsca/sytuacji, nie abstrakcja)`,
-      ``,
-      `(Teraz rozwiń scenę: akcja, dialogi wplecione w ruch, opisy między wymianami.`,
-      `Pamiętaj: dialog NIE jest oddzielnym blokiem, jest częścią narracji.`,
-      `Długość dowolna, ale ~${wordsHint} słów to dobry punkt odniesienia.)`,
-      ``,
-      nextTitle 
-        ? `*Przejście:* ${nextTitle}` 
-        : `(Zamknij scenę naturalnie, bez zapowiedzi - to ostatni rozdział przed epilogiem)`,
-      ``,
-      `═══════════════════════════════════════════════════════════════`,
-      `PRZYPOMNIENIE: Pisz jak scenę ${style.name.toLowerCase()}.`,
-      `NIE pisz suchych wymian zdań. NIE oznaczaj bloków dialogowych.`,
-      `Pokaż świat i postaci w akcji, nie opisuj ich stanów wewnętrznych.`,
-      `═══════════════════════════════════════════════════════════════`,
-    ].join('\n');
+    console.log(`\n✍️  Rozdział ${i}/${to}: "${chapterPlan.title}"`);
+    console.log(`    Typ: ${chapterPlan.type} | POV: ${chapterPlan.pov}`);
+    console.log(`    Cel: ~${targetMinutes} min (${Math.round(targetMinutes * 160)} słów)`);
 
-    let md = unwrapCodeFence(await generateMarkdown(prompt));
-    if (!/^##\s+Rozdział\s+\d+:/m.test(md)) md = `## Rozdział ${i}: ${ch.title}\n${md}\n`;
+    const md = await generateChapterWithContext({
+      workTitle: args.workTitle,
+      author: args.author,
+      chapterPlan,
+      narrativePlan: args.narrativePlan,
+      previousChapters,
+      nextChapterTitle: nextChapter?.title,
+      targetMinutes,
+      mdPath: args.filePath,
+    });
 
-    md = softSanitize(md);
-
-    const safeTitle = slugifyPolish(ch.title);
+    const safeTitle = slugifyPolish(chapterPlan.title);
     const file = path.join(baseOut, `ch-${String(i).padStart(2, '0')}-${safeTitle}.md`);
+
     if (!fs.existsSync(file) || args.force) {
-      let finalMd = md.trim() + '\n';
-      const mode: StudyNotesMode = args.studyNotesMode ?? 'inline';
-      if (mode !== 'none') {
-        const notes = await generateStudyNotes({
-          workTitle: args.workTitle,
-          author: args.author,
-          chapterIndex: i,
-          chapterTitle: ch.title,
-          chapterMarkdown: md,
-        });
-        if (mode === 'inline') {
-          finalMd += `\n${notes}\n`;
-        } else if (mode === 'sidecar') {
-          const sidecar = file.replace(/\.md$/, '.notes.md');
-          fs.writeFileSync(sidecar, notes + '\n', 'utf8');
-        }
-      }
-      fs.writeFileSync(file, finalMd, 'utf8');
+      fs.writeFileSync(file, md, 'utf8');
+      console.log(`   ✅ Zapisano: ${path.basename(file)}`);
+    } else {
+      console.log(`   ⏭️  Pominięto (już istnieje): ${path.basename(file)}`);
     }
 
-    results.push({ index: i, title: ch.title, path: file });
+    const keyEvents = extractKeyEvents(md);
+    previousChapters.push({
+      index: i,
+      title: chapterPlan.title,
+      keyEvents,
+    });
+
+    chapterSummaries.push({
+      index: i,
+      title: chapterPlan.title,
+      keyEvents,
+      keyQuotes: keyEvents.slice(0, 2),
+    });
+
+    results.push({ index: i, title: chapterPlan.title, path: file });
   }
 
-  // Epilog
-  const epilogPrompt = [
-    `Zwróć WYŁĄCZNIE czysty Markdown (bez code fence'ów).`,
-    ``,
-    `DZIEŁO: "${args.workTitle}" — ${args.author}`,
-    ``,
-    `## Epilog`,
-    ``,
-    `Napisz 1-3 zdania zamykające akcję całego dzieła.`,
-    ``,
-    `STYL (${style.name}):`,
-    `- ${style.narrativeStyle}`,
-    `- Konkretny obraz końcowy (co widać, kto gdzie jest)`,
-    `- Czas teraźniejszy`,
-    `- ZERO morałów, analiz, metafor`,
-    `- Jak ostatnie ujęcie filmu - pokazuje, nie tłumaczy`,
-    ``,
-    `PRZYKŁAD DOBRY:`,
-    `"Wokulski stoi przy oknie i patrzy na ulicę. Rzecki liczy monety przy ladzie. Sklep jest cichy."`,
-    ``,
-    `PRZYKŁAD ZŁY (nie tak):`,
-    `"Bohater nauczył się że miłość wymaga poświęceń i zrozumiał sens życia."`,
-  ].join('\n');
+  console.log(`\n📚 Generuję sekcję maturalną (lekka, na końcu)...`);
+  const studySection = await generateFinalStudySection(args.workTitle, args.author, chapterSummaries);
 
-  const epilogMd = softSanitize(unwrapCodeFence(await generateMarkdown(epilogPrompt)));
-  const epilog = /^##\s+Epilog/m.test(epilogMd) ? epilogMd : `## Epilog\n${epilogMd}\n`;
-  fs.writeFileSync(path.join(baseOut, `epilog.md`), epilog + '\n');
+  const studySectionPath = path.join(baseOut, '_SEKCJA_MATURALNA.md');
+  fs.writeFileSync(studySectionPath, studySection, 'utf8');
+  console.log(`   ✅ Sekcja maturalna: _SEKCJA_MATURALNA.md`);
 
   return { outDir: baseOut, written: results };
 }
