@@ -1,5 +1,5 @@
 // file: src/generation/concepts.ts
-import { generateMarkdown } from '../llm/openai';
+import { generateMarkdown } from '../llm';
 
 type Ctx = {
   subjectName: string;

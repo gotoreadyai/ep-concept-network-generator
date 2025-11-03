@@ -1,9 +1,9 @@
-// file: src/generation/handbook.ts
+// file: src/generation/handbook/handbook.ts
 import fs from 'node:fs';
 import path from 'node:path';
 import { generateMarkdown } from '../../llm/openai';
 import { planNarrativeStructure, NarrativePlan, ChapterPlan } from './narrative_planner';
-import { generateFinalStudySection, ChapterSummary } from './final_study_section';
+import { generateFinalStudySection, ChapterSummary, buildStudyRefsInline, buildStudyRefsPanelTokens } from './final_study_section';
 import { detectGenreFromStyle, formatGenreExampleForPrompt, getGenreExample } from './genre_examples';
 import { loadOrGenerateCustomExample } from './custom_example_cache';
 
@@ -43,6 +43,14 @@ function slugifyPolish(s: string) {
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/(^-|-$)/g, '')
     .slice(0, 120);
+}
+
+// === Nowe: stabilne ID i slug rozdziału ===
+function makeChapterId(index: number) {
+  return `ch-${String(index).padStart(2, '0')}`;
+}
+function makeChapterSlug(index: number, title: string) {
+  return `${makeChapterId(index)}-${slugifyPolish(title)}`;
 }
 
 export function parseToc(md: string): Array<{ title: string; description: string }> {
@@ -87,8 +95,17 @@ function softSanitize(md: string) {
   let out = md.replace(/\r/g, '');
   out = out.replace(/\bPrzejścia:/g, '*Przejście:*').replace(/(^|\n)Przejście:/g, '$1*Przejście:*');
   out = sanitizeOrientation(out);
+  // nie usuwamy {#...} — to ważne dla anchorów
   out = out.replace(/(^##[^\n]+?\n)\*([^*][^\n]*?)\*\n/, (_m, head, body) => `${head}${body}\n`);
   return out.trim() + '\n';
+}
+
+/** Jeśli w rozdziale nie ma panelu tokenów, dodaj go na końcu. */
+function injectStudyPanelIfMissing(md: string): string {
+  if (md.includes('<!-- study-refs:panel:start -->')) return md.endsWith('\n') ? md : md + '\n';
+  const panel = buildStudyRefsPanelTokens();
+  const needsNL = md.endsWith('\n') ? '' : '\n';
+  return md + needsNL + '\n' + panel;
 }
 
 export async function generateHandbook(input: HandbookInput): Promise<HandbookResult> {
@@ -214,110 +231,15 @@ async function generateChapterWithContext(args: {
       ``,
       `KRYTYCZNE ZASADY IMMERSJI:`,
       ``,
-      `1. 70% DIALOGU, 30% OPISU`,
+      `1. 70% DIALOGU, 30% OPISU (to domyślna rama — dopuszczalne odchylenie ±20% zależnie od sceny)`,
       `   - Dialog prowadzi akcję, opis tylko między wymianami`,
-      `   - Każda scena = głównie rozmowy postaci`,
+      `   - W wyjątkach (kontekst/światotwórstwo) opis może chwilowo przeważyć`,
       ``,
       `2. KRÓTKIE KWESTIE (1-2 zdania MAX)`,
-      `   - Ludzie mówią krótko, zwłaszcza gdy są zdenerwowani`,
-      `   - Długie tyrady = nienaturalne`,
-      ``,
-      `3. GRUPUJ DIALOG - NIE PRZEPLATAJ KAŻDEJ KWESTII OPISEM`,
-      `   ❌ ZŁE (uderzanie kijem po głowie):`,
-      `   "– Kwestia 1.`,
-      `   Opis gestu 1.`,
-      `   – Kwestia 2.`,
-      `   Opis gestu 2.`,
-      `   – Kwestia 3.`,
-      `   Opis gestu 3."`,
-      `   `,
-      `   ✅ DOBRE (naturalny rytm):`,
-      `   "– Kwestia 1.`,
-      `   – Kwestia 2.`,
-      `   – Kwestia 3.`,
-      `   `,
-      `   Gest/reakcja (1-2 zdania).`,
-      `   `,
-      `   – Kwestia 4.`,
-      `   – Kwestia 5."`,
-      `   `,
-      `   ZASADA: 3-5 kwestii dialogu → POTEM gest/opis (jeśli potrzebny)`,
-      ``,
-      `4. PRZERWY W DIALOGU = GESTY/REAKCJE (ale RZADKO!)`,
-      `   - Tylko gdy coś WAŻNEGO się dzieje`,
-      `   - Nie po każdej kwestii!`,
-      ``,
-      `5. NIEDOPOWIEDZENIA, JĄKANIE, PRZERWY`,
-      `   - "– Ale wie pan... nasze różnice..."`,
-      `   - "– Chciałem... chciałem z panem porozmawiać."`,
-      `   - Pokazuje niepewność, dyskomfort`,
-      ``,
-      `6. CISZA = NAPIĘCIE`,
-      `   - Oznaczaj ją wprost: "Cisza. Długa, ciężka cisza."`,
-      `   - Albo przez akcję: "Nikt nie odpowiada. Ktoś odkłada filiżankę."`,
-      `   - Używaj RZADKO (MAX 2 razy na scenę!)`,
-      ``,
-      `7. GESTY ZAMIAST OPISÓW EMOCJI`,
-      `   ❌ NIE: "Był zdenerwowany"`,
-      `   ✅ TAK: "Krztusi się. Poprawia kołnierz."`,
-      `   `,
-      `   ❌ NIE: "Czuła się nieswojo"`,
-      `   ✅ TAK: "Przestaje grać. Wstaje."`,
-      ``,
-      `8. REAKCJE FIZYCZNE = EMOCJE (GRUPUJ!)`,
-      `   - Po 3-5 kwestiach dialogu: 1-2 zdania akcji`,
-      `   - przestaje grać, wstaje, patrzy w okno, odwraca głowę`,
-      `   - krztusi się, zaciska pięści, unika wzroku`,
-      `   - odkłada przedmiot, poprawia ubranie, wychodzi`,
-      ``,
-      `9. NIE PISZ META-KOMENTARZY O DIALOGU`,
-      `   ❌ ZŁE (bezsensowne ozdobniki):`,
-      `   "Kilka krótkich zdań jedno po drugim."`,
-      `   "Głosy podnoszą się, mieszają."`,
-      `   "Krótko, jeden po drugim."`,
-      `   "Kilka osób szepcze równocześnie, głosy nisko splecione."`,
-      `   `,
-      `   ✅ DOBRE:`,
-      `   Po prostu pisz dialog! Jeśli chaos - pokaż przez nakładające się kwestie:`,
-      `   "– Kwestia 1?`,
-      `   – Nieprawda!`,
-      `   – A kto pana pytał?`,
-      `   `,
-      `   Kilka osób mówi równocześnie."`,
-      ``,
-      `10. PAUZY MIĘDZY DIALOGIEM TYLKO GDY:`,
-      `    - Zmiana tematu/tonu (ważna!)`,
-      `    - Cisza = napięcie (MAX 2 razy na scenę!)`,
-      `    - Fizyczna akcja (wstaje, wychodzi, coś upada)`,
-      `    `,
-      `    ❌ NIE wstawiaj jednozdaniowych "ozdobników":`,
-      `    "Kilka osób szepcze równocześnie, głosy nisko splecione." ← ZŁE!`,
-      `    `,
-      `    ✅ Jeśli pauza - musi mieć cel:`,
-      `    "Wstaje od stołu. Podchodzi do okna." ← OK (fizyczna akcja)`,
-      `    "Cisza. Długa, ciężka cisza." ← OK (napięcie, ale max 2x!)`,
-      ``,
-      `═══════════════════════════════════════════════════════════════`,
-      `PRZYKŁAD DOBREGO RYTMU:`,
-      ``,
-      `"– Wie pan – zaczyna ojciec – nasze nazwisko...`,
-      `– Rozumiem.`,
-      `– Ludzie gadają.`,
-      `– Wiem.`,
-      ``,
-      `Córka wstaje od fortepianu. Podchodzi do matki.`,
-      ``,
-      `– Źle się czuję. Pójdę do siebie.`,
-      `– Już, kochanie?`,
-      `– Przepraszam.`,
-      ``,
-      `Wychodzi z salonu."`,
-      ``,
-      `DLACZEGO TO DZIAŁA:`,
-      `✓ 4 kwestie → gest (ważny!) → 3 kwestie → gest finałowy`,
-      `✓ Dialog PŁYNIE, nie jest przerywany co linijkę`,
-      `✓ Gesty ZNACZĄCE (wstaje, wychodzi) nie dekoracyjne`,
-      `✓ ZERO meta-komentarzy typu "głosy się mieszają"`,
+      `3. GRUPUJ DIALOG (3–5 kwestii) → potem gest/reakcja`,
+      `4. CISZA = NAPIĘCIE (max 2 na scenę)`,
+      `5. GESTY zamiast nazw emocji`,
+      `6. ZERO meta-komentarzy o dialogu`,
       ``,
       `═══════════════════════════════════════════════════════════════`,
       genrePrompt,
@@ -329,13 +251,7 @@ async function generateChapterWithContext(args: {
       customExample,
       ``,
       `═══════════════════════════════════════════════════════════════`,
-      `TERAZ PISZ SWOJĄ SCENĘ używając:`,
-      `- Struktury z przykładu gatunkowego (proporcje, rytm)`,
-      `- Stylu z custom przykładu (ton, atmosfera)`,
-      `- Postaci i sytuacji z TWOJEGO rozdziału (nie kopiuj!)`,
-      ``,
-      `KLUCZOWE: GRUPUJ DIALOG! 3-5 kwestii razem, POTEM gest!`,
-      `ZERO meta-komentarzy! ZERO jednozdaniowych ozdobników!`,
+      `TERAZ PISZ SCENĘ w tym rytmie/stylu.`,
       `═══════════════════════════════════════════════════════════════`,
     ].join('\n'),
 
@@ -343,72 +259,39 @@ async function generateChapterWithContext(args: {
       `TYP: DZIENNIK (pierwsza osoba: ${chapterPlan.povCharacter || 'narrator'})`,
       ``,
       `ZASADY:`,
-      `- Intymny ton, osobiste refleksje`,
-      `- Data na początku: "15 sierpnia 1878:" lub "Dziś..."`,
-      `- Pokazuj emocje przez OBSERWACJE, nie abstrakcje`,
-      `  ❌ NIE: "Byłem bardzo smutny"`,
-      `  ✅ TAK: "Widziałem jak stał dłużej przy oknie. Nie jadł."`,
-      `- Możesz cytować dialogi które zapamiętałeś`,
-      `  "Zapytałem: 'Co się stało?'"`,
-      `  "Odpowiedział: 'Nic.'"`,
-      `  "Ale widziałem – coś się stało."`,
-      `- Krótkie akapity (jak prawdziwy dziennik)`,
-      `- Czas przeszły LUB teraźniejszy (w stylu dziennika)`,
+      `- Intymny ton, obserwacje → emocje`,
+      `- Data lub "Dziś..." na początku`,
+      `- Krótkie akapity, cytaty zapamiętane OK`,
     ].join('\n'),
 
     letter: [
       `TYP: LIST (pierwsza osoba: ${chapterPlan.povCharacter || 'autor listu'})`,
       ``,
       `ZASADY:`,
-      `- KRÓTKI (10-15 linijek MAX)`,
-      `- Format: "Szanowny Panie, ..." / "Drogi [imię], ..."`,
-      `- DWUZNACZNY - coś mówi, coś ukrywa`,
-      `- Powinien COŚ BOLEĆ czytelnika`,
-      `  Np. uprzejme odrzucenie, chłodny dystans`,
+      `- 10–15 linijek, grzeczna dwuznaczność`,
       `- Koniec: podpis`,
-      ``,
-      `PRZYKŁAD TONU:`,
-      `"Dziękuję za wizytę. Była... pouczająca.`,
-      `Proszę jednak pamiętać o różnicach, które nas dzielą.`,
-      `Z wyrazami szacunku, [imię]"`,
-      ``,
-      `(to brzmi uprzejmie, ale BOLI - właśnie o to chodzi!)`,
     ].join('\n'),
 
     monologue: [
-      `TYP: MONOLOG WEWNĘTRZNY (pierwsza osoba)`,
+      `TYP: MONOLOG WEWNĘTRZNY`,
       ``,
       `ZASADY:`,
-      `- Strumień myśli - fragmentaryczny, emocjonalny`,
-      `- Może być chaotyczny (jak prawdziwe myśli)`,
-      `- Pokazuj przez wspomnienia konkretnych scen`,
-      `  ❌ NIE: "Czułem się samotny"`,
-      `  ✅ TAK: "Pamiętam jak stała przy instrumencie. Nie patrzyła na mnie."`,
-      `- Pytania retoryczne OK`,
-      `- Niedokończone myśli OK`,
-      `- EMOCJE przez detale, nie nazwy emocji`,
+      `- Fragmentaryczny tok myśli, detale zamiast nazw emocji`,
     ].join('\n'),
 
     newspaper: [
       `TYP: ARTYKUŁ GAZETOWY / DOKUMENT`,
       ``,
       `ZASADY:`,
-      `- Oficjalny, suchy ton (kontrast z emocjami w scenach!)`,
-      `- Format: Tytuł, Podtytuł, Lead, Treść`,
-      `- KRÓTKI - gazeta nie pisze eposów`,
-      `- Może zawierać plotki, domysły (to gazeta!)`,
-      `- Używaj do przekazania kontekstu społecznego`,
+      `- Lead, treść, ton oficjalny`,
+      `- Krótko, konkretnie`,
     ].join('\n'),
 
     found_document: [
-      `TYP: ZNALEZIONY DOKUMENT (księga rachunkowa, telegram, notatka)`,
+      `TYP: ZNALEZIONY DOKUMENT`,
       ``,
       `ZASADY:`,
-      `- AUTENTYCZNY FORMAT (jak prawdziwy dokument)`,
-      `- Krótki, fragmentaryczny`,
-      `- Liczby, daty, suche fakty`,
-      `- Emocje pokazane PRZEZ LICZBY`,
-      `  Np. "200 zł pożyczka" (pokazuje obsesję bez słów)`,
+      `- Autentyczny format (daty, liczby), fragmentarycznie`,
     ].join('\n'),
   };
 
@@ -417,21 +300,13 @@ async function generateChapterWithContext(args: {
       ? [
           ``,
           `═══════════════════════════════════════════════════════════════`,
-          `KONTEKST: CO BYŁO WCZEŚNIEJ (MUSISZ nawiązać!)`,
+          `KONTEKST: CO BYŁO WCZEŚNIEJ (NAWIĄŻ!)`,
           `═══════════════════════════════════════════════════════════════`,
           ``,
           ...previousChapters.map(
             (prev) =>
               `Rozdział ${prev.index}: ${prev.title}\n${prev.keyEvents.map((e) => `- ${e}`).join('\n')}\n`
           ),
-          ``,
-          `KRYTYCZNE:`,
-          `- Twój rozdział MUSI nawiązywać do tych wydarzeń`,
-          `- Postacie PAMIĘTAJĄ co się stało`,
-          `- Czas i miejsca są CIĄGŁE`,
-          `- Jeśli w Ch${previousChapters[previousChapters.length - 1]?.index} było napięcie,`,
-          `  Twój rozdział musi to KONTYNUOWAĆ lub ROZWIĄZAĆ`,
-          ``,
         ].join('\n')
       : '';
 
@@ -459,45 +334,30 @@ async function generateChapterWithContext(args: {
     `DŁUGOŚĆ I STRUKTURA`,
     `═══════════════════════════════════════════════════════════════`,
     ``,
-    `CEL: ~${targetMinutes} minut czytania (${wordsTarget} słów)`,
+    `CEL: ~${wordsTarget} słów`,
     ``,
     `STRUKTURA ROZDZIAŁU:`,
-    `## Rozdział ${chapterPlan.index}: ${chapterPlan.title}`,
+    `## Rozdział ${chapterPlan.index}: ${chapterPlan.title} {#${makeChapterId(chapterPlan.index)}}`,
     chapterPlan.type === 'scene' ? `*[${chapterPlan.description.split(';').slice(0, 3).join('; ')}]*\n` : '',
     `(2-3 zdania wprowadzenia - konkretny obraz miejsca/sytuacji)`,
     ``,
-    `(TERAZ GŁÓWNA CZĘŚĆ - pamiętaj: 70% dialogu, GRUPUJ kwestie!)`,
+    `(TERAZ GŁÓWNA CZĘŚĆ - dialog prowadzi akcję, ale elastycznie ±20%)`,
     ``,
     nextChapterTitle ? `*Przejście:* ${nextChapterTitle}` : `(Zamknij rozdział bez zapowiedzi)`,
     ``,
-    `═══════════════════════════════════════════════════════════════`,
-    `OSTATNIE PRZYPOMNIENIE - TO NAJWAŻNIEJSZE:`,
-    ``,
-    chapterPlan.type === 'scene'
-      ? [
-          `✓ 70% DIALOGU (rozmowy prowadzą akcję)`,
-          `✓ Krótkie kwestie (1-2 zdania)`,
-          `✓ GRUPUJ dialog: 3-5 kwestii → POTEM gest`,
-          `✓ NIE przeplataj każdej kwestii opisem (to uderzanie kijem!)`,
-          `✓ ZERO meta-komentarzy ("głosy się mieszają" etc.)`,
-          `✓ ZERO jednozdaniowych ozdobników`,
-          `✓ Cisza = napięcie (ale MAX 2 razy!)`,
-          `✓ Gesty zamiast "był smutny"`,
-          `✓ EMOCJE przez akcję, nie opisy`,
-          ``,
-          `WZORUJ SIĘ NA PRZYKŁADACH POWYŻEJ - zwróć uwagę na RYTM!`,
-        ].join('\n')
-      : `Pisz zgodnie z typem: ${chapterPlan.type}`,
-    `═══════════════════════════════════════════════════════════════`,
   ].join('\n');
 
   let md = unwrapCodeFence(await generateMarkdown(prompt));
 
   if (!/^##\s+Rozdział\s+\d+:/m.test(md)) {
-    md = `## Rozdział ${chapterPlan.index}: ${chapterPlan.title}\n${md}\n`;
+    md = `## Rozdział ${chapterPlan.index}: ${chapterPlan.title} {#${makeChapterId(chapterPlan.index)}}\n${md}\n`;
   }
 
-  return softSanitize(md);
+  // sanity + panel tokenów
+  md = softSanitize(md);
+  md = injectStudyPanelIfMissing(md);
+
+  return md;
 }
 
 export async function appendChaptersIndividuallyFromToc(args: {
@@ -508,7 +368,7 @@ export async function appendChaptersIndividuallyFromToc(args: {
   narrativePlan: NarrativePlan;
 } & AppendOpts): Promise<{
   outDir: string;
-  written: Array<{ index: number; title: string; path: string }>;
+  written: Array<{ index: number; title: string; path: string; id: string; slug: string }>;
 }> {
   const baseName = path.basename(args.filePath).replace(/\.md$/i, '');
   const baseOut = args.outDir || path.join(path.dirname(args.filePath), `${baseName}.chapters`);
@@ -516,7 +376,7 @@ export async function appendChaptersIndividuallyFromToc(args: {
 
   const targetMinutes = args.targetMinutesPerChapter ?? 5.0;
 
-  const results: Array<{ index: number; title: string; path: string }> = [];
+  const results: Array<{ index: number; title: string; path: string; id: string; slug: string }> = [];
   const chapterSummaries: ChapterSummary[] = [];
   const previousChapters: Array<{ index: number; title: string; keyEvents: string[] }> = [];
 
@@ -544,8 +404,9 @@ export async function appendChaptersIndividuallyFromToc(args: {
       mdPath: args.filePath,
     });
 
-    const safeTitle = slugifyPolish(chapterPlan.title);
-    const file = path.join(baseOut, `ch-${String(i).padStart(2, '0')}-${safeTitle}.md`);
+    const id = makeChapterId(i);
+    const slug = makeChapterSlug(i, chapterPlan.title);
+    const file = path.join(baseOut, `ch-${String(i).padStart(2, '0')}-${slugifyPolish(chapterPlan.title)}.md`);
 
     if (!fs.existsSync(file) || args.force) {
       fs.writeFileSync(file, md, 'utf8');
@@ -568,15 +429,50 @@ export async function appendChaptersIndividuallyFromToc(args: {
       keyQuotes: keyEvents.slice(0, 2),
     });
 
-    results.push({ index: i, title: chapterPlan.title, path: file });
+    results.push({ index: i, title: chapterPlan.title, path: file, id, slug });
   }
 
-  console.log(`\n📚 Generuję sekcję maturalną (lekka, na końcu)...`);
-  const studySection = await generateFinalStudySection(args.workTitle, args.author, chapterSummaries);
+  console.log(`\n📚 Generuję sekcję maturalną jako BLOKI...`);
+  const studyBlocks = await generateFinalStudySection(args.workTitle, args.author, chapterSummaries);
+  const studyRefs = buildStudyRefsInline();
 
+  // study-index (pomocniczy komentarz dla frontu)
+  const studyIndex = {
+    chapters: results.map((r) => ({
+      index: r.index,
+      id: r.id,
+      slug: path.basename(r.path).replace(/\.md$/, ''),
+      title: r.title,
+    })),
+    axes: [] as string[],
+  };
+  const studyIndexComment = `<!-- study-index: ${JSON.stringify(studyIndex)} -->`;
+
+  // 1) Opcjonalnie dopisz panel odnośników i bloki do GŁÓWNEGO pliku handbooka (nie wymagane przez reader DB-only)
+  const appendPayloadForHandbook = [
+    `\n\n${studyRefs}\n`,
+    `<!-- study-blocks:start -->`,
+    studyBlocks.trim(),
+    `<!-- study-blocks:end -->`,
+    `\n${studyIndexComment}\n`,
+  ].join('\n');
+  try {
+    fs.appendFileSync(args.filePath, appendPayloadForHandbook, 'utf8');
+    console.log(`   ✅ Dodano study-blocks do: ${path.basename(args.filePath)}`);
+  } catch (e) {
+    console.warn(`   ⚠️  Nie udało się dopisać study-blocks do pliku bazowego: ${(e as Error).message}`);
+  }
+
+  // 2) ZAPISZ osobny plik _SEKCJA_MATURALNA.md w katalogu .chapters → to trafi do DB przez indexer
   const studySectionPath = path.join(baseOut, '_SEKCJA_MATURALNA.md');
-  fs.writeFileSync(studySectionPath, studySection, 'utf8');
-  console.log(`   ✅ Sekcja maturalna: _SEKCJA_MATURALNA.md`);
+  const studySectionContent = [
+    `<!-- study-blocks:start -->`,
+    studyBlocks.trim(),
+    `<!-- study-blocks:end -->`,
+    `\n${studyIndexComment}\n`,
+  ].join('\n');
+  fs.writeFileSync(studySectionPath, studySectionContent, 'utf8');
+  console.log(`   ✅ Sekcja maturalna → ${path.basename(studySectionPath)} (dla DB)`);
 
   return { outDir: baseOut, written: results };
 }

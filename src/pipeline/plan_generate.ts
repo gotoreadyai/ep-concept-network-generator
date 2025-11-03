@@ -1,5 +1,5 @@
 // file: src/pipeline/plan_generate.ts
-import { generateJson } from '../llm/openai';
+import { generateJson } from '../llm';
 import { Plan } from '../types/plan';
 import { validatePlan, savePlanDebug } from './plan';
 import { computeDepth } from './depth_from_edges';

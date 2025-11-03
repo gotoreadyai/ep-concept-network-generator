@@ -1,5 +1,5 @@
-// file: src/generation/final_study_section.ts
-import { generateMarkdown } from '../../llm/openai';
+// file: src/generation/handbook/final_study_section.ts
+import { generateMarkdown } from '../../llm';
 
 export type ChapterSummary = {
   index: number;
@@ -8,6 +8,56 @@ export type ChapterSummary = {
   keyQuotes: string[]; // 1-2 parafrazy warte zapamiętania
 };
 
+/**
+ * Linkuje wystąpienia "(Rozdział X)" -> "([Rozdział X](#ch-0X))"
+ * Działa zachowawczo: tylko tam, gdzie jest dokładna fraza "Rozdział <liczba>" w nawiasie.
+ */
+function linkifyChapterRefs(md: string): string {
+  return md.replace(/\(Rozdział\s+(\d{1,2})\)/g, (_m, n) => {
+    const idx = Number(n);
+    const id = `ch-${String(idx).padStart(2, '0')}`;
+    return `([Rozdział ${idx}](#${id}))`;
+  });
+}
+
+/** Panel tokenów do linkowania „Sekcji maturalnej” z poziomu rozdziału. */
+export function buildStudyRefsPanelTokens(): string {
+  return [
+    '<!-- study-refs:panel:start -->',
+    '[REF:STUDY:THESES]',
+    '[REF:STUDY:MOTIFS]',
+    '[REF:STUDY:CHARACTERS]',
+    '[REF:STUDY:CONTEXTS]',
+    '[REF:STUDY:QUESTIONS]',
+    '[REF:STUDY:TOPSCENES]',
+    '<!-- study-refs:panel:end -->',
+    '',
+  ].join('\n');
+}
+
+/** Krótki blok „odnośniki globalne” (opcjonalnie dopinany do głównego pliku handbooka). */
+export function buildStudyRefsInline(): string {
+  return [
+    '<!-- study-refs:start -->',
+    '➡️ **Sekcja maturalna:**',
+    '- [Tezy główne](#study-theses)',
+    '- [Motywy](#study-motifs)',
+    '- [Postacie i relacje](#study-characters)',
+    '- [Konteksty](#study-contexts)',
+    '- [Pytania egzaminacyjne](#study-questions)',
+    '- [Top 10 cytatów/scen](#study-topscenes)',
+    '<!-- study-refs:end -->',
+  ].join('\n');
+}
+
+function unwrapCodeFence(s: string) {
+  const trimmed = s.replace(/\r/g, '').trim();
+  const fenced = trimmed.match(/^```[a-zA-Z0-9-]*\n([\s\S]*?)\n```$/);
+  if (fenced) return fenced[1].trim();
+  return trimmed.replace(/^```[a-zA-Z0-9-]*\n?/, '').replace(/\n?```$/, '').trim();
+}
+
+/** Generuje CAŁĄ „Sekcję maturalną” jako zestaw bloków z kotwicami (#study-*) */
 export async function generateFinalStudySection(
   workTitle: string,
   author: string,
@@ -28,66 +78,29 @@ export async function generateFinalStudySection(
     `- Odpowiedzi na pytania: 2-3 zdania MAX`,
     ``,
     `═══════════════════════════════════════════════════════════════`,
-    `STRUKTURA`,
+    `STRUKTURA (BLOKI Z KOTWICAMI)`,
     `═══════════════════════════════════════════════════════════════`,
     ``,
-    `# 🎓 SEKCJA MATURALNA`,
-    ``,
-    `## 🎯 Tezy główne (3)`,
-    ``,
-    `Każda teza:`,
+    `## 🎯 Tezy główne {#study-theses}`,
     `- **[Nazwa tezy]** — 1 zdanie wyjaśnienia`,
     `  → Zobacz: Rozdział X (co się tam dzieje), Rozdział Y (co się tam dzieje)`,
     ``,
-    `PRZYKŁAD DOBRY:`,
-    `- **Miłość jako obsesja destrukcyjna** — Wokulski traci zdrowy osąd dla uczucia do Izabeli.`,
-    `  → Zobacz: Rozdział 2 (dziennik Rzeckiego o zmianie Wokulskiego), Rozdział 5 (dar mimo chłodu Izabeli)`,
-    ``,
-    `PRZYKŁAD ZŁY (za rozwlekły):`,
-    `- **Miłość jako obsesja** — Główny bohater doświadcza głębokiej transformacji psychologicznej...`,
-    ``,
-    `---`,
-    ``,
-    `## 🗺️ Mapa motywów (5-7)`,
-    ``,
-    `Każdy motyw:`,
+    `## 🗺️ Mapa motywów {#study-motifs}`,
     `- **[Motyw]** (Rozdziały: X, Y, Z) — 1 zdanie co reprezentuje`,
     ``,
-    `PRZYKŁAD:`,
-    `- **Sklep** (Rozdziały: 1, 7, 11) — Symbol pracy i tożsamości Wokulskiego; przestrzeń bezpieczna vs obce salony`,
-    `- **Salon** (Rozdziały: 2, 4, 8) — Świat pozorów, konwenansów i wykluczenia`,
+    `## 👥 Postacie i relacje {#study-characters}`,
+    `- **Bohater** — funkcja; relacje: 1–2 punkty`,
     ``,
-    `---`,
+    `## 🧭 Konteksty (2–3) {#study-contexts}`,
+    `- Historyczno-społeczny — 1–2 zdania`,
+    `- Filozoficzny/kulturowy — 1–2 zdania`,
     ``,
-    `## 💬 Top 10 cytatów/scen do matury`,
+    `## ❓ Pytania egzaminacyjne (8–10) {#study-questions}`,
+    `**Q: [pytanie]**`,
+    `A: 2–3 zdania MAX z odwołaniem do rozdziałów`,
     ``,
-    `Format:`,
+    `## 🔟 Top 10 cytatów/scen do matury {#study-topscenes}`,
     `1. **[Parafraza sceny]** (Rozdział X) — dlaczego ważne (1 zdanie)`,
-    ``,
-    `PRZYKŁAD DOBRY:`,
-    `1. **Wokulski stoi przy oknie i patrzy na pałac** (Rozdział 1) — Tęsknota za niedostępnym światem arystokracji`,
-    `2. **Rzecki w dzienniku: "Boję się, nigdy nie widziałem go takiego"** (Rozdział 2) — Moment rozpoznania obsesji`,
-    ``,
-    `PRZYKŁAD ZŁY (za ogólny):`,
-    `1. **Opis sytuacji gospodarczej** (Rozdział 3) — Kontekst historyczny`,
-    ``,
-    `NIE cytuj dosłownie długich fragmentów - PARAFRAZY!`,
-    ``,
-    `---`,
-    ``,
-    `## ❓ Pytania egzaminacyjne (8-10)`,
-    ``,
-    `Format:`,
-    `**Q: [Pytanie w stylu matury]**`,
-    `A: [Odpowiedź 2-3 zdania MAX. Konkretnie, z odniesieniem do rozdziałów.]`,
-    ``,
-    `PRZYKŁAD DOBRY:`,
-    `**Q: Dlaczego miłość Wokulskiego jest tragiczna?**`,
-    `A: Bo łączy dwoje ludzi z różnych światów. Izabela nigdy nie wyjdzie poza swoją klasę (Rozdział 3: obiad u Łęckich), Wokulski nigdy w nią nie wejdzie (Rozdział 8: odrzucenie w salonie). To jak próba połączenia wody i oleju.`,
-    ``,
-    `PRZYKŁAD ZŁY (za długi):`,
-    `**Q: Omów problem miłości w dziele.**`,
-    `A: Miłość w dziele przedstawiona jest jako skomplikowany problem społeczny i psychologiczny. Autor ukazuje różne aspekty uczucia, jego destrukcyjny wpływ na psychikę bohatera, oraz niemożność przełamania barier klasowych...`,
     ``,
     `═══════════════════════════════════════════════════════════════`,
     `MATERIAŁ ŹRÓDŁOWY (streszczenia rozdziałów)`,
@@ -105,19 +118,16 @@ export async function generateFinalStudySection(
     ),
     ``,
     `═══════════════════════════════════════════════════════════════`,
-    `TERAZ NAPISZ SEKCJĘ MATURALNĄ według powyższej struktury.`,
+    `TERAZ WYPEŁNIJ WSZYSTKIE POWYŻSZE BLOKI.`,
     `PAMIĘTAJ: Lekko, przystępnie, konkretnie!`,
     `═══════════════════════════════════════════════════════════════`,
   ].join('\n');
 
-  console.log(`📚 Generuję sekcję maturalną...`);
   const raw = await generateMarkdown(prompt);
 
-  // Upewnij się że zaczyna się od nagłówka
+  // Upewnij się, że bloki mają poprawne kotwice – i autolink „Rozdział X”
   let cleaned = raw.trim();
-  if (!/^#\s+/.test(cleaned)) {
-    cleaned = `# 🎓 SEKCJA MATURALNA\n\n${cleaned}`;
-  }
+  cleaned = linkifyChapterRefs(cleaned);
 
   return cleaned + '\n';
 }

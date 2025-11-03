@@ -1,7 +1,7 @@
 // file: src/generation/sources.ts
 import fs from 'node:fs';
 import path from 'node:path';
-import { generateMarkdown } from '../llm/openai';
+import { generateMarkdown } from '../llm';
 
 export type SourceItem = never; // nie używamy już struktury JSON
 

@@ -1,256 +1,325 @@
 // file: src/index_handbook.ts
-/// <reference types="node" />
 import 'dotenv/config';
-import fs from 'node:fs';
-import path from 'node:path';
+import fs from 'fs';
+import path from 'path';
 import minimist from 'minimist';
+
+// === GENERATOR: plan → rozdziały → sekcja maturalna (bloki)
 import {
   generateHandbook,
   appendChaptersIndividuallyFromToc,
-  parseToc,
-  HandbookResult,
 } from './generation/handbook/handbook';
-import {
-  findHandbookIdByTitle,
-  insertSlHandbook,
-  insertSlChapter,
-  updateSlChapterContentByOrder,
-} from './db/sl_handbooks';
-import { generateAnalysisPack } from './generation/handbook/analysis_pack';
 import { NarrativePlan } from './generation/handbook/narrative_planner';
 
-function findLatestHandbookFile(): string {
-  const dir = path.join('debug', 'handbooks');
-  if (!fs.existsSync(dir)) throw new Error(`Nie znaleziono katalogu: ${dir}`);
-  const files = fs
+// === DB repo (wydzielone)
+import {
+  upsertHandbookAscii,
+  findHandbookIdByTitleAscii,
+  ensureChapterMeta,
+  setChapterContentForce,
+  updateHandbookChaptersCount,
+} from './db/handbooks_repo';
+
+// ==============
+// POMOCNICZE I/O
+// ==============
+function readUtf8(p: string): string {
+  return fs.readFileSync(p, 'utf8');
+}
+
+function listChapterFiles(dir: string): string[] {
+  return fs
     .readdirSync(dir)
-    .filter(
-      (f) =>
-        f.startsWith('handbook-') &&
-        f.endsWith('.md') &&
-        !f.endsWith('.chapters.md') &&
-        // ✅ nie bierzemy pakietów analitycznych jako bazowego handbooka
-        !f.includes('.analysis.')
-    )
-    .map((f) => path.join(dir, f))
+    .filter((f) => /^ch-\d+.*\.md$/i.test(f))
+    .sort((a, b) => {
+      const na = parseInt(a.match(/^ch-(\d+)/i)?.[1] ?? '0', 10);
+      const nb = parseInt(b.match(/^ch-(\d+)/i)?.[1] ?? '0', 10);
+      return na - nb;
+    });
+}
+
+function extractTitleAndDescription(md: string): { title: string; description: string } {
+  const lines = md.split(/\r?\n/);
+  let title = '';
+  let description = '';
+
+  const h = lines.find((l) => /^#{1,2}\s+/.test(l.trim()));
+  if (h) {
+    title = h.replace(/^#{1,2}\s+/, '').trim();
+    const idx = lines.indexOf(h);
+    const after = lines.slice(idx + 1).find((l) => l.trim().length > 0 && !/^#/.test(l.trim()));
+    if (after) description = after.trim();
+  } else {
+    for (let i = 0; i < Math.min(lines.length, 20); i++) {
+      const t = lines[i]?.trim();
+      if (!t) continue;
+      if (/^\d+/.test(t)) continue;
+      if (!title) {
+        title = t;
+        continue;
+      }
+      if (!description && t !== title) {
+        description = t;
+        break;
+      }
+    }
+  }
+
+  if (!title) title = 'Rozdział';
+  if (!description) description = 'Opis w przygotowaniu';
+  return { title, description };
+}
+
+function firstParagraph(md: string): string | undefined {
+  return md.split(/\r?\n\r?\n/).find((p) => p.trim().length > 0)?.trim();
+}
+
+// =============================
+// AUTODETEKCJA KATALOGU ROZDZIAŁÓW
+// =============================
+function autoDetectLatestChaptersDir(cwd: string): string {
+  const dbg = path.join(cwd, 'debug', 'handbooks');
+  if (!fs.existsSync(dbg) || !fs.statSync(dbg).isDirectory()) {
+    console.error('❌ Nie znaleziono debug/handbooks z katalogami *.chapters');
+    process.exit(1);
+  }
+
+  const candidates = fs
+    .readdirSync(dbg)
+    .map((name) => path.join(dbg, name))
+    .filter((p) => p.endsWith('.chapters') && fs.existsSync(p) && fs.statSync(p).isDirectory())
     .sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
-  if (!files.length) throw new Error('Brak plików handbook-*.md.');
-  return files[0];
-}
 
-function findLatestChaptersDir() {
-  const mdPath = findLatestHandbookFile();
-  const h1 = fs.readFileSync(mdPath, 'utf8').match(/^#\s+(.+?)\s+[—-]\s+wersja\s+skrócona/i);
-  const workTitle = h1 ? h1[1].trim() : 'Nieznany tytuł';
-  const dir = path.join(path.dirname(mdPath), path.basename(mdPath).replace(/\.md$/i, '') + '.chapters');
-  if (!fs.existsSync(dir)) throw new Error(`Brak katalogu z rozdziałami: ${dir}`);
-  return { dir, workTitle, mdPath };
-}
-
-function loadNarrativePlan(mdPath: string): NarrativePlan | undefined {
-  const planPath = mdPath.replace(/\.md$/, '.plan.json');
-  if (fs.existsSync(planPath)) {
-    console.log(`📋 Wczytano plan: ${path.basename(planPath)}`);
-    return JSON.parse(fs.readFileSync(planPath, 'utf8')) as NarrativePlan;
-  }
-  console.warn(`⚠️  Brak planu: ${planPath}`);
-  return undefined;
-}
-
-async function ensureHandbookSeeded(mdPath: string, workTitle: string): Promise<string> {
-  const md = fs.readFileSync(mdPath, 'utf8');
-  const hbTitle = `${workTitle} — wersja skrócona`;
-
-  let handbookId = await findHandbookIdByTitle(hbTitle);
-  if (handbookId) return handbookId;
-
-  console.log(`Seed: "${hbTitle}" (tytuły+opisy z ToC, content=NULL)...`);
-  const mDesc = md.match(/^#\s+.+?\n+([\s\S]*?)\n+##\s+Spis treści/m);
-  const description = (mDesc?.[1] || '').trim();
-  const toc = parseToc(md);
-
-  handbookId = await insertSlHandbook({
-    title: hbTitle,
-    description: description || 'Skrót dzieła.',
-  });
-
-  for (let i = 0; i < toc.length; i++) {
-    const { title, description } = toc[i];
-    await insertSlChapter({ handbookId, title, description, sortOrder: i, ifNotExists: true });
-  }
-
-  console.log(`Utworzono handbook + ${toc.length} rozdziałów (content pusty).`);
-  return handbookId;
-}
-
-async function runGenerate(argv: minimist.ParsedArgs) {
-  const work = String(argv.work || '').trim();
-  const author = String(argv.author || '').trim();
-  const minutes = Number(argv.minutes || 5);
-  const minutesPerChapter = Number(argv.minutesPerChapter || 5.0); // Zwiększone z 1.0 do 5.0
-  const force = String(argv.force || 'false') === 'true';
-  const analysis = argv.analysis === undefined ? false : String(argv.analysis) !== 'false';
-
-  const from = argv.from ? Number(argv.from) : undefined;
-  const to = argv.to ? Number(argv.to) : undefined;
-
-  if (!work || !author) {
-    console.error(
-      'Użycie: yarn handbook --work "Tytuł" --author "Autor" [--minutes 5] [--minutesPerChapter 5.0] [--from N] [--to M] [--analysis true|false] [--force true|false]'
-    );
+  if (!candidates.length) {
+    console.error('❌ Nie ma żadnego katalogu *.chapters w debug/handbooks');
     process.exit(1);
   }
 
-  console.log(`\n╔═══════════════════════════════════════════════════════════════╗`);
-  console.log(`║  🎭 GENERATOR IMMERSYJNYCH SKRÓTÓW LEKTUR                    ║`);
-  console.log(`╚═══════════════════════════════════════════════════════════════╝`);
-  console.log(`\n📖 Dzieło: "${work}" — ${author}`);
-  console.log(`⏱️  Cel: ${minutes} min (ToC) + ${minutesPerChapter} min/rozdział`);
-  console.log(``);
-
-  console.log(`🎭 Faza 1/3: Planowanie struktury narracyjnej...`);
-  console.log(`   (AI wybiera: voice, style, typy rozdziałów)`);
-
-  const res: HandbookResult = await generateHandbook({ workTitle: work, author, targetMinutes: minutes });
-
-  console.log(`\n✅ Faza 1 zakończona:`);
-  console.log(`   📄 TOC: ${path.basename(res.markdownPath)}`);
-  console.log(`   📋 Plan: ${path.basename(res.markdownPath.replace(/\.md$/, '.plan.json'))}`);
-  console.log(`   🎭 Voice: ${res.narrativePlan.narrativeVoice}`);
-  console.log(`   ✍️  Style: ${res.narrativePlan.styleInspiration}`);
-  console.log(`   🎵 Tone: ${res.narrativePlan.overallTone}`);
-
-  const typeCounts = res.narrativePlan.chapters.reduce((acc, ch) => {
-    acc[ch.type] = (acc[ch.type] || 0) + 1;
-    return acc;
-  }, {} as Record<string, number>);
-  console.log(`   📚 Mix typów:`, typeCounts);
-
-  console.log(`\n✍️  Faza 2/3: Generowanie rozdziałów z emocjami...`);
-  console.log(`   (70% dialogu, gesty, cisze, napięcia)`);
-
-  const { outDir, written } = await appendChaptersIndividuallyFromToc({
-    filePath: res.markdownPath,
-    workTitle: work,
-    author,
-    targetMinutesPerChapter: minutesPerChapter,
-    narrativePlan: res.narrativePlan,
-    range: from && to ? { from, to } : from ? { from, to: from } : undefined,
-    force,
-  });
-
-  console.log(`\n✅ Faza 2 zakończona:`);
-  console.log(`   📁 Katalog: ${outDir}`);
-  console.log(`   📖 Rozdziały:`);
-  for (const w of written) {
-    const num = String(w.index).padStart(2, '0');
-    const plan = res.narrativePlan.chapters[w.index - 1];
-    const typeEmoji = {
-      scene: '🎬',
-      diary: '📓',
-      letter: '✉️',
-      monologue: '💭',
-      newspaper: '📰',
-      found_document: '📄',
-    }[plan.type] || '📝';
-    console.log(`      ${typeEmoji} ${num}. ${w.title} [${plan.type}]`);
-  }
-  console.log(`      🎓 _SEKCJA_MATURALNA.md`);
-
-  if (analysis) {
-    console.log(`\n📊 Faza 3/3: Pakiet maturalny (analiza zbiorcza)...`);
-    const tocMd = fs.readFileSync(res.markdownPath, 'utf8');
-    const toc = parseToc(tocMd).map((t, i) => ({ index: i + 1, title: t.title, description: t.description }));
-    const packPath = await generateAnalysisPack({
-      workTitle: work,
-      author,
-      toc,
-      chaptersDir: outDir,
-      outDir: path.dirname(res.markdownPath),
-    });
-    console.log(`✅ Pakiet: ${path.basename(packPath)}`);
-  }
-
-  console.log(`\n╔═══════════════════════════════════════════════════════════════╗`);
-  console.log(`║  🎉 GOTOWE! Skrót z emocjami wygenerowany.                   ║`);
-  console.log(`╚═══════════════════════════════════════════════════════════════╝\n`);
+  const chosen = candidates[0];
+  console.log(`📁 Używam katalogu rozdziałów: ${chosen}`);
+  return chosen;
 }
 
-async function runFinish(argv: minimist.ParsedArgs) {
-  const chaptersDirArg = argv.chaptersDir ? String(argv.chaptersDir) : '';
-  const workTitleArg = argv.work ? String(argv.work) : '';
-  const noSekcjaMaturalna = !!argv.noSekcjaMaturalna;
+// =============================
+// ODCZYT TYTUŁU DZIEŁA
+// =============================
+function detectWorkTitleFromSiblingHandbookMd(chaptersDir: string): string | null {
+  const parent = path.dirname(chaptersDir);
+  const mdCandidates = fs
+    .readdirSync(parent)
+    .filter((f) => /^handbook-.*\.md$/i.test(f))
+    .map((f) => path.join(parent, f))
+    .sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
 
-  // ✅ Jeśli użytkownik podał katalog rozdziałów i tytuł dzieła,
-  //    NIE próbujemy wykrywać „najnowszego” handbooka, tylko korzystamy z danych wejściowych.
-  const picked =
-    chaptersDirArg && workTitleArg
-      ? {
-          dir: chaptersDirArg,
-          workTitle: workTitleArg,
-          mdPath: chaptersDirArg.replace(/\.chapters$/, ''),
-        }
-      : findLatestChaptersDir();
+  for (const p of mdCandidates) {
+    const md = readUtf8(p);
+    const h1 = md.split(/\r?\n/).find((l) => /^#\s+.+$/.test(l.trim()));
+    if (!h1) continue;
+    const raw = h1.replace(/^#\s+/, '').trim();
+    const m = raw.match(/^(.*)\s+[—-]\s+wersja skrócona$/i);
+    if (m && m[1]) return m[1].trim();
+  }
+  return null;
+}
 
-  const { dir, workTitle, mdPath } = picked;
+function guessWorkTitleFromDir(chaptersDir: string): string {
+  const base = path.basename(chaptersDir).replace(/\.chapters$/, '');
+  const guess = base.replace(/^handbook[-_]?/i, '').replace(/-\d{4}-\d{2}-\d{2}t.*$/i, '');
+  return guess
+    .replace(/[-_]+/g, ' ')
+    .trim()
+    .replace(/\b\w/g, (m) => m.toUpperCase());
+}
 
-  const files = fs
-    .readdirSync(dir)
-    .filter((f) => /^ch-\d{2}-.*\.md$/.test(f))
-    .sort();
-  if (!files.length) {
-    console.error(`Brak plików rozdziałów w: ${dir}`);
+// ==================
+// VALIDACJA (opcjonalna)
+// ==================
+function validateChaptersHavePanels(chaptersDir: string): string[] {
+  const files = listChapterFiles(chaptersDir);
+  const bad: string[] = [];
+  for (const f of files) {
+    const md = readUtf8(path.join(chaptersDir, f));
+    if (!md.includes('<!-- study-refs:panel:start -->')) bad.push(f);
+  }
+  return bad;
+}
+
+function validateStudySection(chaptersDir: string): string[] {
+  const p = path.join(chaptersDir, '_SEKCJA_MATURALNA.md');
+  const problems: string[] = [];
+  if (!fs.existsSync(p)) {
+    problems.push('Brak pliku _SEKCJA_MATURALNA.md');
+    return problems;
+  }
+  const md = readUtf8(p);
+  const anchors = ['#study-theses', '#study-motifs', '#study-characters', '#study-contexts', '#study-questions', '#study-topscenes'];
+  for (const a of anchors) {
+    if (!md.includes(a)) problems.push(`Brak kotwicy ${a}`);
+  }
+  if (!md.includes('<!-- study-blocks:start -->') || !md.includes('<!-- study-blocks:end -->')) {
+    problems.push('Brak markerów study-blocks:start/end');
+  }
+  return problems;
+}
+
+// ==================
+// ZAPIS DO DB
+// ==================
+async function persistHandbookFolderToDb(latestChaptersDir: string, workTitleOverride?: string) {
+  const files = listChapterFiles(latestChaptersDir);
+  if (files.length === 0) {
+    console.error('❌ Brak plików ch-*.md');
     process.exit(1);
   }
 
-  const from = argv.from ? Number(argv.from) : 1;
-  const to = argv.to ? Number(argv.to) : files.length;
+  // tytuł dzieła
+  const siblingTitle = detectWorkTitleFromSiblingHandbookMd(latestChaptersDir);
+  const guessedTitle = guessWorkTitleFromDir(latestChaptersDir);
+  const workTitle = (workTitleOverride || siblingTitle || guessedTitle).trim();
 
-  const hbTitle = `${workTitle} — wersja skrócona`;
-  let handbookId = await findHandbookIdByTitle(hbTitle);
-  if (!handbookId) handbookId = await ensureHandbookSeeded(mdPath, workTitle);
+  // opis – pierwszy akapit z README albo z pierwszego rozdziału
+  let description = 'Skrót dzieła.';
+  const readme = path.join(latestChaptersDir, 'README.md');
+  if (fs.existsSync(readme)) {
+    description = firstParagraph(readUtf8(readme)) ?? description;
+  } else {
+    const firstFile = path.join(latestChaptersDir, files[0]);
+    description = extractTitleAndDescription(readUtf8(firstFile)).description || description;
+  }
 
-  console.log(`\n🗄️  Push treści do DB: ${hbTitle}`);
+  const hbTitleAscii = `${workTitle} - wersja skrócona`;
+
+  // handbookId
+  let handbookId: string | null = await findHandbookIdByTitleAscii(workTitle);
+  if (!handbookId) {
+    const { id } = await upsertHandbookAscii({ title: hbTitleAscii, description });
+    handbookId = id;
+  }
+  if (!handbookId) {
+    throw new Error('Brak handbookId po upsercie');
+  }
+
+  console.log(`\n🗄️  Zapis do DB: ${hbTitleAscii}`);
   console.log(`   ID: ${handbookId}`);
-  console.log(`   Zakres: ${from}-${to}`);
+  console.log(`   Katalog: ${latestChaptersDir}`);
+  console.log(`   Rozdziały: ${files.length}`);
 
-  for (let i = from; i <= to; i++) {
-    const idx = i - 1;
-    const file = files[i - 1];
-    const md = fs.readFileSync(path.join(dir, file), 'utf8');
-    await updateSlChapterContentByOrder({ handbookId, sortOrder: idx, content: md.trim() });
-    console.log(`   ✅ ${file}`);
+  // rozdziały
+  for (let i = 0; i < files.length; i++) {
+    const file = files[i];
+    const md = readUtf8(path.join(latestChaptersDir, file)).trim();
+    const meta = extractTitleAndDescription(md);
+
+    const id = await ensureChapterMeta(handbookId, i, meta.title, meta.description);
+    await setChapterContentForce(handbookId, i, meta, md);
+    console.log(`   ✅ ${file} → id: ${id || '(insert fallback)'}`);
   }
 
-  const sekcjaPath = path.join(dir, '_SEKCJA_MATURALNA.md');
-  if (!noSekcjaMaturalna && fs.existsSync(sekcjaPath)) {
-    const sekcjaMd = fs.readFileSync(sekcjaPath, 'utf8').trim();
-    await insertSlChapter({
-      handbookId,
+  // sekcja maturalna (jeśli jest) → jako OSTATNI „rozdział”
+  const sekcja = path.join(latestChaptersDir, '_SEKCJA_MATURALNA.md');
+  let totalCount = files.length;
+  if (fs.existsSync(sekcja)) {
+    const md = readUtf8(sekcja).trim();
+    const sortOrder = files.length; // po wszystkich rozdziałach
+    const meta = {
       title: 'Sekcja maturalna',
-      description: 'Tezy, motywy, cytaty i pytania egzaminacyjne',
-      sortOrder: files.length,
-      ifNotExists: true,
-    });
-    await updateSlChapterContentByOrder({ handbookId, sortOrder: files.length, content: sekcjaMd });
-    console.log(`   ✅ _SEKCJA_MATURALNA.md`);
+      description: 'Tezy, motywy, postacie, konteksty, pytania i top sceny (bloki do readera).',
+    };
+    const id = await ensureChapterMeta(handbookId, sortOrder, meta.title, meta.description);
+    await setChapterContentForce(handbookId, sortOrder, meta, md);
+    console.log(`   ✅ _SEKCJA_MATURALNA.md → id: ${id || '(insert fallback)'}`);
+    totalCount += 1;
   }
 
-  console.log(`\n✅ Zakończono push do DB.`);
+  await updateHandbookChaptersCount(handbookId, totalCount);
+  console.log(`📚 Zaktualizowano chapters_count → ${totalCount}`);
+
+  console.log(`\n✅ Wszystkie rozdziały + sekcja maturalna zapisane.`);
+}
+
+// ==================
+// GŁÓWNY PRZEBIEG
+// ==================
+async function runFullPipeline(opts: {
+  work: string;
+  author: string;
+  targetMinutes?: number;
+  desiredChapters?: number;
+  rangeFrom?: number;
+  rangeTo?: number;
+  validate?: boolean;
+}) {
+  // 1) Plan + wstęp + ToC
+  const { markdownPath, narrativePlan } = await generateHandbook({
+    workTitle: opts.work,
+    author: opts.author,
+    targetMinutes: opts.targetMinutes ?? 5,
+    desiredChapters: opts.desiredChapters ?? 12,
+  });
+
+  // 2) Rozdziały + Sekcja maturalna (bloki + panele tokenów) → zapis .chapters/*
+  const { outDir } = await appendChaptersIndividuallyFromToc({
+    filePath: markdownPath,
+    workTitle: opts.work,
+    author: opts.author,
+    targetMinutesPerChapter: opts.targetMinutes ?? 5,
+    narrativePlan: narrativePlan as NarrativePlan,
+    range: opts.rangeFrom || opts.rangeTo ? { from: opts.rangeFrom ?? 1, to: opts.rangeTo ?? (narrativePlan.chapters.length) } : undefined,
+  });
+
+  // 3) (opcjonalnie) walidacja artefaktów przed zrzutem do DB
+  if (opts.validate) {
+    const missingPanels = validateChaptersHavePanels(outDir);
+    const studyProblems = validateStudySection(outDir);
+    if (missingPanels.length) {
+      console.warn(`⚠️ Rozdziały bez panelu odnośników: ${missingPanels.join(', ')}`);
+    }
+    if (studyProblems.length) {
+      console.warn(`⚠️ Problemy z _SEKCJA_MATURALNA.md:\n- ${studyProblems.join('\n- ')}`);
+    }
+  }
+
+  // 4) Zrzut do DB
+  await persistHandbookFolderToDb(outDir, opts.work);
 }
 
 async function main() {
-  const argv = minimist(process.argv.slice(2), {
-    boolean: ['finish', 'noSekcjaMaturalna'],
-    string: ['work', 'author', 'minutes', 'minutesPerChapter', 'from', 'to', 'chaptersDir', 'analysis', 'force'],
-    alias: { finish: 'f' },
-  });
+  const argv = minimist(process.argv.slice(2));
+  const wantFinishOnly = !!argv.finish;
 
-  if (argv.finish) await runFinish(argv);
-  else await runGenerate(argv);
+  // Informacyjne: legacy flagi (nie wpływają na flow — mamy bloki w sekcji maturalnej)
+  if (typeof argv.studyNotes !== 'undefined') {
+    console.log(`ℹ️  --studyNotes=${argv.studyNotes} (zignorowane; notatki per rozdział nie są używane w tym flow)`);
+  }
+  if (typeof argv.analysis !== 'undefined') {
+    console.log(`ℹ️  --analysis=${argv.analysis} (zignorowane; „pakiet analityczny” nie jest używany — sekcja maturalna generuje bloki)`);
+  }
+
+  if (wantFinishOnly) {
+    const dir = autoDetectLatestChaptersDir(process.cwd());
+    await persistHandbookFolderToDb(dir, argv.work);
+    return;
+  }
+
+  // Tryb „pełny” (Twój przypadek)
+  const work = String(argv.work || '').trim();
+  const author = String(argv.author || '').trim();
+
+  if (!work || !author) {
+    console.error('Użycie: yarn handbook --work "Tytuł" --author "Autor" [--targetMinutes 5] [--desiredChapters 12] [--rangeFrom 1 --rangeTo 12] [--validate]');
+    console.error('Albo:  yarn handbook --finish   (tylko indeksowanie najnowszego katalogu .chapters do DB)');
+    process.exit(1);
+  }
+
+  await runFullPipeline({
+    work,
+    author,
+    targetMinutes: argv.targetMinutes ? Number(argv.targetMinutes) : undefined,
+    desiredChapters: argv.desiredChapters ? Number(argv.desiredChapters) : undefined,
+    rangeFrom: argv.rangeFrom ? Number(argv.rangeFrom) : undefined,
+    rangeTo: argv.rangeTo ? Number(argv.rangeTo) : undefined,
+    validate: !!argv.validate,
+  });
 }
 
-main().catch((err) => {
-  console.error('\n❌ Błąd:', err && (err as Error).message ? (err as Error).message : err);
-  process.exit(1);
-});
+main();
