@@ -21,20 +21,15 @@ export type NarrativePlan = {
   styleInspiration: string;
   styleReasoning: string;
   overallTone: string;
-
-  /** „Duch” dzieła – wewnętrzny klimat/idea, która powinna filtrować wszystkie wybory narracyjne. */
   spiritualCore: string;
-
-  /** (opcjonalnie) Dwie–trzy osie interpretacyjne, które pomagają w maturze (np. „sacrum–profanum”, „jednostka–społeczeństwo”). */
   interpretiveAxes?: string[];
-
   chapters: ChapterPlan[];
 };
 
 export async function planNarrativeStructure(
   workTitle: string,
   author: string,
-  desiredChapters: number
+  targetChapters: number
 ): Promise<NarrativePlan> {
   const prompt = {
     task: 'Plan narrative structure for literary adaptation',
@@ -47,11 +42,8 @@ export async function planNarrativeStructure(
       'Planuj typy rozdziałów tak, by naprzemiennie budować i rozładowywać napięcie.',
       'Duch dzieła (spiritualCore) musi być rozpoznany na etapie planu i później kierować stylem każdej sceny.'
     ],
-    work: {
-      title: workTitle,
-      author: author
-    },
-    targetChapters: desiredChapters,
+    work: { title: workTitle, author },
+    targetChapters,
     decisions: {
       '1_narrative_voice': {
         description: "Jaki główny 'narrative voice'?",
@@ -78,7 +70,7 @@ export async function planNarrativeStructure(
         examples: ['melancholic', 'tense', 'adventurous', 'dark_psychological', 'humorous', 'romantic']
       },
       '4_chapter_structure': {
-        description: `Zaplanuj ${desiredChapters} rozdziałów — MIX TYPÓW buduje rytm!`,
+        description: `Zaplanuj ${targetChapters} rozdziałów — MIX TYPÓW buduje rytm!`,
         format: {
           index: 'number (1-based)',
           title: 'Tytuł (krótki, intrygujący)',
@@ -109,45 +101,42 @@ export async function planNarrativeStructure(
           '   Co 2–3 rozdziały: zmień typ (odśwież narrację).',
           '',
           '5. Nie przesadzaj z experimental:',
-          '   - Max 2–3 rozdziały newspaper/found_document na 12',
+          '   - Max 2–3 rozdziały newspaper/found_document',
           '   - Diary: 2–4 rozdziały OK (ale nie pod rząd!)',
-          '   - Letter: 1–2 rozdziały (w kluczowych momentach)',
-          '   - Monologue: 1–2 rozdziały (tylko dla protagonisty)'
+          '   - Letter: 1–2 rozdziały',
+          '   - Monologue: 1–2 rozdziały'
         ]
       },
       '5_spiritual_core': {
         description:
-          "Opisz w 1–2 zdaniach 'ducha' utworu — jego wewnętrzny klimat/ideę lub pragnienie (np. nostalgia za utraconym światem; bunt jednostki; ironiczny chłód). Nie powtarzaj samego tonu; chodzi o głębsze źródło emocji i sensu."
+          "Opisz w 1–2 zdaniach 'ducha' utworu — wewnętrzny klimat/ideę."
       },
       '6_interpretive_axes': {
         description:
-          'Wypisz 2–3 krótkie „osie interpretacyjne” (antynomie/układy napięć), które czytelnik może śledzić przez rozdziały (np. „jednostka–społeczeństwo”, „sfera prywatna–publiczna”, „sacrum–profanum”).'
+          'Wypisz 2–3 osie interpretacyjne (antynomie/układy napięć).'
       }
     },
     output_format: {
-      narrativeVoice: 'one of: pure_scenes | diary_and_scenes | letters_and_scenes | experimental',
-      narrativeVoiceReasoning: 'string (2–3 sentences)',
+      narrativeVoice: 'pure_scenes | diary_and_scenes | letters_and_scenes | experimental',
+      narrativeVoiceReasoning: 'string',
       styleInspiration: 'string',
-      styleReasoning: 'string (2–3 sentences)',
+      styleReasoning: 'string',
       overallTone: 'string',
       spiritualCore: 'string',
       interpretiveAxes: ['string', 'string'],
       chapters: [
         {
           index: 1,
-          title: 'string (intrygujący!)',
-          description: 'string (akcja, nie analiza)',
+          title: 'string',
+          description: 'string',
           type: 'scene',
           pov: '3rd_person',
           povCharacter: 'optional string',
           tone: 'optional string'
-        },
-        '... more chapters'
+        }
       ]
     }
   };
-
-  console.log(`🎭 Planuję strukturę narracyjną dla: "${workTitle}" (${author})...`);
 
   try {
     const plan = await generateJson<NarrativePlan>(JSON.stringify(prompt, null, 2));
@@ -155,30 +144,15 @@ export async function planNarrativeStructure(
     if (!plan.chapters || plan.chapters.length === 0) {
       throw new Error('AI nie zwróciło rozdziałów');
     }
-
-    // Walidacja: Ch 1 = scene + 3rd person
+    // Walidacja: Ch1 = scene + 3rd_person
     if (plan.chapters[0].type !== 'scene' || plan.chapters[0].pov !== '3rd_person') {
-      console.warn('⚠️  Poprawiam Rozdział 1 na scene + 3rd_person (wymagane)');
       plan.chapters[0].type = 'scene';
       plan.chapters[0].pov = '3rd_person';
     }
 
-    console.log(`✅ Plan gotowy:`);
-    console.log(`   Voice: ${plan.narrativeVoice}`);
-    console.log(`   Style: ${plan.styleInspiration}`);
-    console.log(`   Tone: ${plan.overallTone}`);
-    console.log(`   Duch: ${plan.spiritualCore}`);
-    console.log(`   Rozdziały: ${plan.chapters.length}`);
-
-    const typeCounts = plan.chapters.reduce((acc, ch) => {
-      acc[ch.type] = (acc[ch.type] || 0) + 1;
-      return acc;
-    }, {} as Record<string, number>);
-    console.log(`   Mix typów:`, typeCounts);
-
     return plan;
-  } catch (err) {
-    console.error('❌ Błąd planowania, używam fallback (pure_scenes)');
+  } catch {
+    // Fallback: neutralny plan
     return {
       narrativeVoice: 'pure_scenes',
       narrativeVoiceReasoning: 'Fallback — bezpieczna struktura',
@@ -187,12 +161,12 @@ export async function planNarrativeStructure(
       overallTone: 'balanced',
       spiritualCore: 'Pragnienie ładu w świecie pełnym sprzeczności.',
       interpretiveAxes: ['jednostka–społeczeństwo', 'rozsądek–uczucie'],
-      chapters: Array.from({ length: desiredChapters }, (_, i) => ({
+      chapters: Array.from({ length: targetChapters }, (_, i) => ({
         index: i + 1,
         title: `Rozdział ${i + 1}`,
         description: 'Kontynuacja akcji',
-        type: 'scene' as ChapterType,
-        pov: '3rd_person' as POV
+        type: 'scene',
+        pov: '3rd_person'
       }))
     };
   }

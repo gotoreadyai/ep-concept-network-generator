@@ -4,6 +4,7 @@ import path from 'node:path';
 import { generateMarkdown } from '../../llm/openai';
 import { planNarrativeStructure, NarrativePlan } from './narrative_planner';
 import { generateFinalStudySection, ChapterSummary, sanitizeChapterTitle } from './final_study_section';
+import { discoverMilestones, ensurePlanHasMilestones, suggestChapterCount } from './milestones';
 
 export type HandbookInput = {
   workTitle: string;
@@ -34,13 +35,9 @@ function slugifyPolish(s: string) {
 /** Czyści nagłówki z {#ch-XX} i usuwa duplikaty, zamienia [Scena ...] na zwykły akapit. */
 function normalizeChapterMarkdown(md: string): string {
   let out = md.replace(/\r/g, '');
-  // usuń {#ch-XX} z nagłówków
   out = out.replace(/^(#{1,3}\s+.*)\s*\{#ch-\d{2}\}\s*$/gmi, (_m, h) => h.trim());
-  // [Scena ...] lub *[Scena ...]* -> akapit
   out = out.replace(/^\s*\*?\[([^[\]]+?)\]\*?\s*$/m, (_m, inside) => `${String(inside).trim()}`);
-  // duplikujące się nagłówki jeden po drugim
   out = out.replace(/^(#{1,3}\s+.+)\n\1\n/gm, (_m, h) => `${h}\n`);
-  // kosmetyka pustych linii
   out = out.replace(/\n{3,}/g, '\n\n');
   return out.trim() + '\n';
 }
@@ -60,7 +57,18 @@ function extractKeyEvents(chapterMd: string): string[] {
   return sentences.slice(0, 5);
 }
 
-/** Buduje prośbę do modelu o pełny rozdział z płynnymi dialogami i fabularnym wstępem. */
+/** ————— NOWE: esencja stylu/tonu/ducha dla generatora rozdziałów ————— */
+function buildStyleEssence(plan: NarrativePlan): string {
+  const axes = (plan.interpretiveAxes || []).filter(Boolean).join(' | ');
+  const lines: string[] = [];
+  lines.push(`STYL INSPIRACJA: ${plan.styleInspiration}`);
+  lines.push(`TON: ${plan.overallTone}`);
+  lines.push(`DUCH UTWORU: ${plan.spiritualCore}`);
+  if (axes) lines.push(`OSIE INTERPRETACYJNE: ${axes}`);
+  return lines.join('\n');
+}
+
+/** ————— ZMIANA: prompt rozdziałowy — teraz dostaje esencję stylu ————— */
 function buildChapterPrompt(args: {
   workTitle: string;
   author: string;
@@ -71,9 +79,10 @@ function buildChapterPrompt(args: {
   povCharacter?: string;
   planDescription: string;
   targetMinutesPerChapter: number;
+  styleEssence: string;              // ⟵ NOWE
+  narrativeVoice?: string;           // (opcjonalnie: do celów diagnostycznych)
 }) {
   const minutes = clamp(Math.round(args.targetMinutesPerChapter || 5), 3, 8);
-  // Zakładamy 160–190 słów/minutę
   const targetWords = clamp(minutes * 170, 500, 1400);
 
   return [
@@ -81,6 +90,7 @@ function buildChapterPrompt(args: {
     ``,
     `Dzieło: "${args.workTitle}" — ${args.author}`,
     `Rozdział ${args.chIndex}: ${sanitizeChapterTitle(args.chTitle)}`,
+    args.narrativeVoice ? `Tryb narracyjny (plan): ${args.narrativeVoice}` : ``,
     ``,
     `WYMAGANIA NARRACYJNE (KLUCZOWE):`,
     `- Zacznij od 1–2 zdań *fabularnego wprowadzenia* (kontekst miejsca/czasu/sytuacji).`,
@@ -89,6 +99,9 @@ function buildChapterPrompt(args: {
     `- Sceny łącz krótkimi mostkami narracyjnymi (1–2 zdania) zamiast cięć.`,
     `- Bez kotwic {#ch-XX}. Opis typu [Scena w salonie…] NIE używaj — opisz to zdaniami fabularnymi.`,
     `- Długość: ~${targetWords} słów (±15%).`,
+    ``,
+    `ESENCJA STYLU / TON / DUCH (MUSI BYĆ ZACHOWANE):`,
+    args.styleEssence,
     ``,
     `INSPIRACJA/PLAN (skrót akcji, nie cytuj):`,
     `- ${args.planDescription}`,
@@ -101,7 +114,7 @@ function buildChapterPrompt(args: {
     `(1 akapit fabularnego wprowadzenia – proza, nie w nawiasach)`,
     ``,
     `(Dalej scena/e: dialogi + krótkie mostki narracyjne; minimum dwa fragmenty płynnego dialogu bez didaskaliów w środku)`,
-  ].join('\n');
+  ].filter(Boolean).join('\n');
 }
 
 export function parseToc(md: string): Array<{ title: string; description: string }> {
@@ -121,24 +134,45 @@ export function parseToc(md: string): Array<{ title: string; description: string
 
 function softSanitize(md: string) {
   let out = md.replace(/\r/g, '');
-  // kosmetyka drobna spisu treści i markerów
   out = out.replace(/\bPrzejścia:/g, '*Przejście:*').replace(/(^|\n)Przejście:/g, '$1*Przejście:*');
-  // [meta] → akapit
   out = out.replace(/^\s*\[([^[\]]+?)\]\s*$/m, (_m, inside) => `*${String(inside).trim()}*`);
-  // usuń ewentualny duplikat H1
   out = out.replace(/^(# .+)\n\1\n/gm, (_m, h) => `${h}\n`);
   return out.trim() + '\n';
 }
 
 export async function generateHandbook(input: HandbookInput): Promise<HandbookResult> {
-  const targetMinutes = clamp(Math.round(input.targetMinutes ?? 5), 3, 8);
-  const desiredChapters = clamp(Math.round(input.desiredChapters ?? 12), 10, 15);
   const outDir = input.outDir || path.join('debug', 'handbooks');
   ensureDir(outDir);
 
-  console.log(`🎭 Faza 1: Planowanie struktury narracyjnej...`);
-  const narrativePlan = await planNarrativeStructure(input.workTitle, input.author, desiredChapters);
+  // 0) Najpierw — niech model zaproponuje kamienie milowe (z cache).
+  const discovered = await discoverMilestones(input.workTitle, input.author);
+  const targetChapters = suggestChapterCount({
+    targetMinutes: input.targetMinutes,
+    milestonesCount: discovered.milestones.length || 10,
+    desiredChapters: input.desiredChapters,
+  });
 
+  // 1) Plan (korzysta z docelowej liczby rozdziałów)
+  console.log(`🎭 Faza 1: Planowanie struktury narracyjnej... (chapters=${targetChapters})`);
+  let narrativePlan = await planNarrativeStructure(input.workTitle, input.author, targetChapters);
+
+  // 2) Wymuś obecność kanonu (bez twardych list — korzystamy z propozycji modelu)
+  narrativePlan = ensurePlanHasMilestones(narrativePlan, discovered.milestones);
+
+  // 2.1) ————— NOWE: persist planu z esencją stylu/ducha —————
+  const ts = new Date().toISOString().replace(/[:.]/g, '-');
+  const safeTitle = slugifyPolish(input.workTitle);
+  const planPath = path.join(outDir, `handbook-${safeTitle}-${ts}.plan.json`);
+  const styleEssence = buildStyleEssence(narrativePlan);
+  fs.writeFileSync(planPath, JSON.stringify({
+    workTitle: input.workTitle,
+    author: input.author,
+    narrativePlan,
+    styleEssence,
+  }, null, 2), 'utf8');
+  console.log(`🧭 Zapisano plan narracyjny (+esencję stylu) → ${path.basename(planPath)}`);
+
+  // 3) H1 + TOC z planu
   const prompt = [
     `Zwróć WYŁĄCZNIE czysty Markdown (bez code fence'ów).`,
     ``,
@@ -157,8 +191,6 @@ export async function generateHandbook(input: HandbookInput): Promise<HandbookRe
   if (!/^\s*#\s+/.test(markdown)) markdown = `# ${input.workTitle} — wersja skrócona\n\n${markdown}`;
   const cleaned = softSanitize(markdown);
 
-  const ts = new Date().toISOString().replace(/[:.]/g, '-');
-  const safeTitle = slugifyPolish(input.workTitle);
   const mdPath = path.join(outDir, `handbook-${safeTitle}-${ts}.md`);
   fs.writeFileSync(mdPath, cleaned + '\n', 'utf8');
 
@@ -195,6 +227,9 @@ export async function appendChaptersIndividuallyFromToc(args: {
 
   const written: Array<{ index: number; title: string; path: string; id: string; slug: string }> = [];
 
+  // ——— Esencja stylu/ducha wyciągnięta z planu (persistowana też w .plan.json) ———
+  const styleEssence = buildStyleEssence(args.narrativePlan);
+
   for (const ch of args.narrativePlan.chapters) {
     if (ch.index < from || ch.index > to) continue;
 
@@ -203,10 +238,9 @@ export async function appendChaptersIndividuallyFromToc(args: {
     const slug = `${id}-${slugifyPolish(cleanTitle)}`;
     const outPath = path.join(baseOut, `${slug}.md`);
 
-    // Pominięcie jeśli istnieje i nie wymusiliśmy
     if (!args.force && fs.existsSync(outPath)) {
       const existing = normalizeChapterMarkdown(fs.readFileSync(outPath, 'utf8'));
-      fs.writeFileSync(outPath, existing, 'utf8'); // tylko normalizacja na świeżo
+      fs.writeFileSync(outPath, existing, 'utf8');
       console.log(`↩️  Pominąłem generację (istnieje): ${path.basename(outPath)}`);
       written.push({ index: ch.index, title: cleanTitle, path: outPath, id, slug });
       continue;
@@ -222,6 +256,8 @@ export async function appendChaptersIndividuallyFromToc(args: {
       povCharacter: ch.povCharacter,
       planDescription: ch.description,
       targetMinutesPerChapter: args.targetMinutesPerChapter ?? 5,
+      styleEssence,                       // ⟵ NOWE: twardo wstrzykujemy esencję
+      narrativeVoice: args.narrativePlan.narrativeVoice,
     });
 
     console.log(`📝 Generuję rozdział ${ch.index}: ${cleanTitle}...`);
@@ -229,7 +265,6 @@ export async function appendChaptersIndividuallyFromToc(args: {
     let md = unwrapCodeFence(String(raw));
     md = normalizeChapterMarkdown(md);
 
-    // Gwarancja nagłówka
     if (!/^##\s+Rozdział\s+\d+:/m.test(md)) {
       md = `## Rozdział ${String(ch.index)}: ${cleanTitle}\n\n` + md.trim() + '\n';
     }

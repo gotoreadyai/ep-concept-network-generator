@@ -280,7 +280,7 @@ async function runFullPipeline(opts: {
     workTitle: opts.work,
     author: opts.author,
     targetMinutes: opts.targetMinutes ?? 5,
-    desiredChapters: opts.desiredChapters ?? 12,
+    desiredChapters: opts.desiredChapters,
   });
 
   const { outDir } = await appendChaptersIndividuallyFromToc({
