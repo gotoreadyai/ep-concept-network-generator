@@ -1,112 +1,102 @@
 // file: src/generation/handbook/final_study_section.ts
 import { generateMarkdown } from '../../llm';
+import { renderStudySection, StudyBlock, LinkStrategy } from './templates/study_section_template';
 
 export type ChapterSummary = {
   index: number;
   title: string;
-  keyEvents: string[]; // 2-3 kluczowe wydarzenia
-  keyQuotes: string[]; // 1-2 parafrazy warte zapamiętania
+  keyEvents: string[];
+  keyQuotes: string[];
 };
 
+// eksportujemy, bo handbook.ts tego używa
+export function sanitizeChapterTitle(raw: string): string {
+  return String(raw)
+    .replace(/\s*\{#ch-\d{2}\}\s*$/i, '') // zdejmij {#ch-XX}
+    .replace(/<[^>]+>/g, '')             // html -> out
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/** Bardzo prosty parser: wyciąga listy z markdownu do tablic stringów */
+function parseBullets(md: string): string[] {
+  return md
+    .split(/\r?\n/)
+    .map(l => l.trim())
+    .filter(l => /^[-*]\s+.+/.test(l))
+    .map(l => l.replace(/^[-*]\s+/, '').trim());
+}
+
 /**
- * Zamienia "(Rozdział X)" → link HTML z kotwicą "#ch-0X".
- * Działa zachowawczo: tylko tam, gdzie jest dokładna fraza "Rozdział <liczba>" w nawiasie.
+ * Generuje zawartość HTML sekcji maturalnej na bazie Markdownu od modelu,
+ * bez regexowych „walidatorów” HTML. Treść jest escapowana i renderowana
+ * przez prosty szablon w renderStudySection().
  */
-function linkifyChapterRefsToHtml(mdOrHtml: string): string {
-  return mdOrHtml.replace(/\(Rozdział\s+(\d{1,2})\)/g, (_m, n) => {
-    const idx = Number(n);
-    const id = `ch-${String(idx).padStart(2, '0')}`;
-    return `<a href="#${id}">Rozdział ${idx}</a>`;
-  });
-}
-
-function unwrapCodeFence(s: string) {
-  const trimmed = s.replace(/\r/g, '').trim();
-  const fenced = trimmed.match(/^```[a-zA-Z0-9-]*\n([\s\S]*?)\n```$/);
-  if (fenced) return fenced[1].trim();
-  return trimmed.replace(/^```[a-zA-Z0-9-]*\n?/, '').replace(/\n?```$/, '').trim();
-}
-
-/** Dodatkowa SANITACJA HTML dla study-blocków (po LLM). */
-function sanitizeStudyHtml(html: string): string {
-  let out = html;
-
-  // 1) Usuń ewentualne fence’y i zdekoduj typowe encje (gdyby gdzieś przeszły)
-  out = out.replace(/```[a-z0-9-]*\n?/gi, '').replace(/```/g, '');
-  out = out.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
-
-  // 2) Usuń puste <li> (to psuło składnię i kolorowanie)
-  out = out.replace(/<li>\s*<\/li>/g, '');
-
-  // 3) Zbędne podwójne spacje/linie w środku list
-  out = out
-    .replace(/(\n|\r)+\s*(<\/li>)/g, '$2')
-    .replace(/<ul>\s+\n/g, '<ul>\n')
-    .replace(/\n\s+<\/ul>/g, '\n</ul>');
-
-  // 4) Upewnij się, że każdy study-block jest odseparowany pustą linią (czytelność/bezpieczny parse)
-  out = out.replace(/<\/study-block>\s*(?=<study-block\b)/g, '</study-block>\n\n');
-
-  // 5) Drobne porządki białych znaków
-  out = out.replace(/[ \t]+\n/g, '\n').trim();
-
-  return out;
-}
-
-/** Generuje CAŁĄ „Sekcję maturalną” jako zestaw SEMANTYCZNYCH BLOKÓW HTML (<study-block id="...">) */
 export async function generateFinalStudySection(
   workTitle: string,
   author: string,
-  chapterSummaries: ChapterSummary[]
+  chapterSummaries: ChapterSummary[],
+  linkStrategy: LinkStrategy = { mode: 'hash' } // DOMYŚLNIE: #ch-XX
 ): Promise<string> {
-  const material = [
-    `DZIEŁO: "${workTitle}" — ${author}`,
-    `ROZDZIAŁY: ${chapterSummaries.length}`,
-    ``,
-    `════════════════ MATERIAŁ ŹRÓDŁOWY (streszczenia rozdziałów) ════════════════`,
-    ...chapterSummaries.map(
-      (ch) => [
-        `Rozdział ${ch.index}: ${ch.title}`,
-        `- ${ch.keyEvents.join('\n- ') || '(brak)'}`
-      ].join('\n')
-    ),
-  ].join('\n');
-
+  // Model oddaje TYLKO markdown: 6 sekcji z nagłówkami i listami. Zero HTML.
   const prompt = [
-    `Zwróć WYŁĄCZNIE czysty HTML (bez code fence'ów, bez <html> i <body>).`,
-    `Masz wygenerować sekcję maturalną jako SEMANTYCZNE BLOKI <study-block> z unikalnymi id:`,
-    `- <study-block id="study-theses" data-type="theses"> — lista tez; każda pozycja zawiera odniesienia do rozdziałów w postaci "(Rozdział X)"`,
-    `- <study-block id="study-motifs" data-type="motifs"> — mapa motywów; dla każdego motywu podaj rozdziały w nawiasie "(Rozdział X, Rozdział Y)"`,
-    `- <study-block id="study-characters" data-type="characters"> — postacie i relacje (krótko)`,
-    `- <study-block id="study-contexts" data-type="contexts"> — 2–3 konteksty zwięźle`,
-    `- <study-block id="study-questions" data-type="questions"> — 8–10 pytań i krótkich odpowiedzi (2–3 zdania)`,
-    `- <study-block id="study-topscenes" data-type="topscenes"> — 10 parafraz scen z odwołaniem do rozdziałów`,
-    ``,
-    `W każdym study-block użyj nagłówka <h2> oraz prostego HTML (<ul>, <li>, <p>, <strong>).`,
-    `Unikaj długich cytatów; zamiast tego parafrazuj. Ton: coach egzaminacyjny, zwięźle i konkretnie.`,
-    ``,
-    material,
-    ``,
-    `TERAZ WYRZUĆ TYLKO TE BLOKI <study-block> — nic poza nimi.`,
+    'Zwróć WYŁĄCZNIE czysty Markdown (bez code fence’ów).',
+    'Przygotuj 6 sekcji: "Tezy i problemy", "Motywy i symbole", "Postacie (charakterystyka)", "Kontekst historyczno-kulturowy", "Pytania egzaminacyjne / analizacyjne", "Sceny kluczowe (top scenes)".',
+    'Każda sekcja: nagłówek "## ..." i 5–8 wypunktowań ("- ...").',
+    'Nie używaj HTML. Odnośniki do rozdziałów pisz jako "(Rozdział X)".',
+    '',
+    `Dzieło: "${workTitle}" — ${author}.`,
+    `Materiał do inspiracji (skrót zdarzeń):`,
+    ...chapterSummaries.map(s => `- [${String(s.index).padStart(2,'0')}] ${sanitizeChapterTitle(s.title)} — ${s.keyEvents.slice(0,2).join('; ')}`),
   ].join('\n');
 
-  const raw = await generateMarkdown(prompt);
-  // LLM może oddać Markdown-HTML — zdejmij ewentualne fence'y i podlinkuj rozdziały
-  let cleaned = unwrapCodeFence(raw).trim();
+  console.log('🧠 [final_study_section] PROMPT →\n', prompt, '\n');
 
-  // Przekształć "(Rozdział X)" → <a href="#ch-0X">Rozdział X</a>
-  cleaned = linkifyChapterRefsToHtml(cleaned);
+  const mdRaw = await generateMarkdown(prompt);
+  const md = String(mdRaw).replace(/\r/g, '');
+  console.log('🧠 [final_study_section] MODEL→MARKDOWN (raw) →\n', md, '\n');
 
-  // SANITY FIX: usuń puste li, fence’y, itp.
-  cleaned = sanitizeStudyHtml(cleaned);
+  // Podział po nagłówkach "## "
+  const parts = md.split(/^##\s+/m).map(s => s.trim()).filter(Boolean);
 
-  // Owiń całość w kontener pomagający readerowi (zachowujemy markery do łatwego parsowania)
-  const wrapped = [
-    '<study-section>',
-    cleaned,
-    '</study-section>',
-    ''
-  ].join('\n');
+  // Mapowanie nazw na nasze id bloków
+  const targetMap: Array<{ test: RegExp; id: string; title: string }> = [
+    { test: /^Tezy/i,        id: 'study-theses',     title: 'Tezy i problemy' },
+    { test: /^Motywy/i,      id: 'study-motifs',     title: 'Motywy i symbole' },
+    { test: /^Postacie/i,    id: 'study-characters', title: 'Postacie (charakterystyka)' },
+    { test: /^Kontekst/i,    id: 'study-contexts',   title: 'Kontekst historyczno-kulturowy' },
+    { test: /^Pytania/i,     id: 'study-questions',  title: 'Pytania egzaminacyjne / analizacyjne' },
+    { test: /^Sceny/i,       id: 'study-topscenes',  title: 'Sceny kluczowe (top scenes)' },
+  ];
 
-  return wrapped;
+  const collected = new Map<string, string[]>();
+
+  for (const part of parts) {
+    const [head, ...rest] = part.split('\n');
+    const body = rest.join('\n');
+    const bullets = parseBullets(body);
+    const spec = targetMap.find(t => t.test.test(head));
+    if (spec) {
+      collected.set(spec.id, bullets);
+      console.log(`🔎 [final_study_section] Sekcja: "${head}" → bullets=${bullets.length}`);
+    } else {
+      console.log(`ℹ️  [final_study_section] Pominięto nagłówek: ${head}`);
+    }
+  }
+
+  // 6 bloków w stałej kolejności — brakujące uzupełnij pustymi listami
+  const blocks: StudyBlock[] = targetMap.map(({ id, title }) => ({ id, title, items: collected.get(id) || [] }));
+
+  // Soft-walidacja liczby punktów (log + kontynuacja)
+  for (const b of blocks) {
+    if (b.items.length < 5 || b.items.length > 8) {
+      console.warn(`⚠️  [final_study_section] Sekcja ${b.id} ma ${b.items.length} punktów (oczekiwane 5–8). Kontynuuję.`);
+    }
+  }
+
+  // Deterministyczne renderowanie przez szablon – zero regexów na HTML
+  const html = renderStudySection(blocks, linkStrategy);
+  console.log('🧱 [final_study_section] HTML RENDERED →\n', html, '\n');
+
+  return html;
 }

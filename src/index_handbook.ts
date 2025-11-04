@@ -10,6 +10,7 @@ import {
   appendChaptersIndividuallyFromToc,
 } from './generation/handbook/handbook';
 import { NarrativePlan } from './generation/handbook/narrative_planner';
+import { generateFinalStudySection, ChapterSummary } from './generation/handbook/final_study_section';
 
 // === DB repo (wydzielone)
 import {
@@ -132,7 +133,7 @@ function guessWorkTitleFromDir(chaptersDir: string): string {
 }
 
 // ==================
-// VALIDACJA (zaktualizowana pod nową strukturę ściągi)
+// VALIDACJA — uproszczona pod **tylko globalne bloki**
 // ==================
 function validateChaptersHavePanels(chaptersDir: string): string[] {
   const files = listChapterFiles(chaptersDir);
@@ -146,11 +147,9 @@ function validateChaptersHavePanels(chaptersDir: string): string[] {
 
 /**
  * NOWA walidacja „_SEKCJA_MATURALNA.md”:
- * - wymagamy <study-section>
- * - w środku dwie części: <study-global> oraz <study-per-chapter>
- * - w części per-chapter muszą istnieć bloki z data-chapter="ch-XX"
- * - dodatkowo: dwa globalne bloki: study-characters oraz study-contexts (minimum dla ściągi)
- * - markery <!-- study-blocks:start/end -->
+ * - wymagamy <study-section> i <study-global>
+ * - nie wymagamy <study-per-chapter> (bo zrezygnowaliśmy z bloków per-chapter)
+ * - zalecamy obecność co najmniej 2 kluczowych bloków globalnych
  */
 function validateStudySection(chaptersDir: string): string[] {
   const p = path.join(chaptersDir, '_SEKCJA_MATURALNA.md');
@@ -161,36 +160,26 @@ function validateStudySection(chaptersDir: string): string[] {
   }
   const md = readUtf8(p);
 
-  // Markery sekcji (spójność z pipeline)
   if (!md.includes('<!-- study-blocks:start -->') || !md.includes('<!-- study-blocks:end -->')) {
     problems.push('Brak markerów study-blocks:start/end');
   }
-
-  // Opakowanie całości
   if (!/<study-section[\s>]/i.test(md)) problems.push('Brak <study-section>');
-
-  // Dwie części ściągi
   if (!/<study-global[\s>]/i.test(md)) problems.push('Brak <study-global>');
-  if (!/<study-per-chapter[\s>]/i.test(md)) problems.push('Brak <study-per-chapter>');
 
-  // Globalne minimum
-  if (!/<study-block[^>]+id=["']study-characters["']/i.test(md)) {
-    problems.push('Brak bloku globalnego: study-characters');
-  }
-  if (!/<study-block[^>]+id=["']study-contexts["']/i.test(md)) {
-    problems.push('Brak bloku globalnego: study-contexts');
-  }
+  const countKeyGlobals =
+    (/<study-block[^>]+id=["']study-characters["']/i.test(md) ? 1 : 0) +
+    (/<study-block[^>]+id=["']study-contexts["']/i.test(md) ? 1 : 0) +
+    (/<study-block[^>]+data-type=["']theses["']/i.test(md) ? 1 : 0);
 
-  // Czy istnieją jakiekolwiek bloki per-rozdział
-  if (!/data-chapter=["']ch-\d{2}["']/i.test(md)) {
-    problems.push('Brak bloków per-rozdział (data-chapter="ch-XX") w <study-per-chapter>');
+  if (countKeyGlobals < 2) {
+    problems.push('Za mało bloków globalnych (wymagane ≥2 z: theses/characters/contexts).');
   }
 
   return problems;
 }
 
 // ==================
-// ZAPIS DO DB
+// ZAPIS DO DB (pełny dump całego folderu)
 // ==================
 async function persistHandbookFolderToDb(latestChaptersDir: string, workTitleOverride?: string) {
   const files = listChapterFiles(latestChaptersDir);
@@ -250,7 +239,7 @@ async function persistHandbookFolderToDb(latestChaptersDir: string, workTitleOve
     const sortOrder = files.length; // po wszystkich rozdziałach
     const meta = {
       title: 'Sekcja maturalna',
-      description: 'Ściągawka: część globalna + bloki per rozdział (data-chapter="ch-XX").',
+      description: 'Ściągawka: tylko globalne bloki (<study-global>) bez per-chapter.',
     };
     const id = await ensureChapterMeta(handbookId, sortOrder, meta.title, meta.description);
     await setChapterContentForce(handbookId, sortOrder, meta, md);
@@ -265,6 +254,110 @@ async function persistHandbookFolderToDb(latestChaptersDir: string, workTitleOve
 }
 
 // ==================
+// NOWE: REGENERACJA TYLKO SEKCJI MATURALNEJ
+// ==================
+async function regenerateStudySectionOnly(opts: {
+  dir?: string;
+  work?: string;
+  author?: string;
+  validate?: boolean;
+}) {
+  const chaptersDir = opts.dir ? path.resolve(opts.dir) : autoDetectLatestChaptersDir(process.cwd());
+  const files = listChapterFiles(chaptersDir);
+  if (files.length === 0) {
+    console.error('❌ Brak plików ch-*.md');
+    process.exit(1);
+  }
+
+  // Tytuł/autor (autor opcjonalny — użyty tylko w promptach)
+  const siblingTitle = detectWorkTitleFromSiblingHandbookMd(chaptersDir);
+  const workTitle = (opts.work || siblingTitle || guessWorkTitleFromDir(chaptersDir)).trim();
+  const author = (opts.author || 'Autor nieznany').trim();
+
+  // Zbierz ChapterSummary z istniejących rozdziałów
+  const summaries: ChapterSummary[] = files.map((f, i) => {
+    const md = readUtf8(path.join(chaptersDir, f));
+    const meta = extractTitleAndDescription(md);
+    // prosta heurystyka „keyEvents” — zgodna z generatorem
+    const sentences = md
+      .replace(/^##.+$/gm, '')
+      .replace(/\*\[.+?\]\*/g, '')
+      .split(/[.!?]+/)
+      .map((s) => s.trim())
+      .filter((s) => s.length > 20 && s.length < 200);
+    const keyEvents = [...sentences.slice(0, 3), ...sentences.slice(-2)].filter(Boolean);
+
+    return {
+      index: i + 1,
+      title: meta.title.replace(/^##\s+/, ''),
+      keyEvents,
+      keyQuotes: keyEvents.slice(0, 2),
+    };
+  });
+
+  console.log(`\n📚 Generuję NOWĄ sekcję maturalną z ${summaries.length} rozdziałów...`);
+  const studyBlocks = await generateFinalStudySection(workTitle, author, summaries);
+
+  // Zapisz/odśwież _SEKCJA_MATURALNA.md
+  const studyIndex = {
+    chapters: summaries.map((s, idx) => ({
+      index: s.index,
+      id: `ch-${String(s.index).padStart(2, '0')}`,
+      slug: path.basename(files[idx]).replace(/\.md$/, ''),
+      title: s.title,
+    })),
+    axes: [] as string[],
+  };
+  const studyIndexComment = `<!-- study-index: ${JSON.stringify(studyIndex)} -->`;
+  const studySectionPath = path.join(chaptersDir, '_SEKCJA_MATURALNA.md');
+  const payload = [
+    `<!-- study-blocks:start -->`,
+    studyBlocks.trim(),
+    `<!-- study-blocks:end -->`,
+    `\n${studyIndexComment}\n`,
+  ].join('\n');
+
+  fs.writeFileSync(studySectionPath, payload, 'utf8');
+  console.log(`   ✅ _SEKCJA_MATURALNA.md zapisany → ${path.basename(studySectionPath)}`);
+
+  // (opcjonalnie) walidacja
+  if (opts.validate) {
+    const problems = validateStudySection(chaptersDir);
+    if (problems.length) {
+      console.warn(`⚠️ Problemy z _SEKCJA_MATURALNA.md:\n- ${problems.join('\n- ')}`);
+    } else {
+      console.log('✅ Walidacja sekcji maturalnej OK');
+    }
+  }
+
+  // Persist TYLKO sekcji maturalnej do DB jako ostatniego „rozdziału”
+  const hbTitleAscii = `${workTitle} - wersja skrócona`;
+  let handbookId: string | null = await findHandbookIdByTitleAscii(workTitle);
+  if (!handbookId) {
+    const description =
+      firstParagraph(readUtf8(path.join(chaptersDir, files[0]))) ?? 'Skrót dzieła.';
+    const { id } = await upsertHandbookAscii({ title: hbTitleAscii, description });
+    handbookId = id;
+  }
+  if (!handbookId) {
+    throw new Error('Brak handbookId po upsercie');
+  }
+
+  const sortOrder = files.length; // sekcja po rozdziałach
+  const meta = {
+    title: 'Sekcja maturalna',
+    description: 'Ściągawka: tylko globalne bloki (<study-global>) bez per-chapter.',
+  };
+  const md = readUtf8(studySectionPath).trim();
+  const id = await ensureChapterMeta(handbookId, sortOrder, meta.title, meta.description);
+  await setChapterContentForce(handbookId, sortOrder, meta, md);
+  await updateHandbookChaptersCount(handbookId, files.length + 1);
+
+  console.log(`🗄️  Zapisano sekcję maturalną w DB (handbookId=${handbookId}, idx=${sortOrder}).`);
+  console.log(`\n✅ Gotowe: sekcja maturalna zregenerowana i zapisana (rozdziały nietknięte).`);
+}
+
+// ==================
 // GŁÓWNY PRZEBIEG
 // ==================
 async function runFullPipeline(opts: {
@@ -276,7 +369,6 @@ async function runFullPipeline(opts: {
   rangeTo?: number;
   validate?: boolean;
 }) {
-  // 1) Plan + wstęp + ToC
   const { markdownPath, narrativePlan } = await generateHandbook({
     workTitle: opts.work,
     author: opts.author,
@@ -284,7 +376,6 @@ async function runFullPipeline(opts: {
     desiredChapters: opts.desiredChapters ?? 12,
   });
 
-  // 2) Rozdziały + Sekcja maturalna → zapis .chapters/*
   const { outDir } = await appendChaptersIndividuallyFromToc({
     filePath: markdownPath,
     workTitle: opts.work,
@@ -294,7 +385,6 @@ async function runFullPipeline(opts: {
     range: opts.rangeFrom || opts.rangeTo ? { from: opts.rangeFrom ?? 1, to: opts.rangeTo ?? (narrativePlan.chapters.length) } : undefined,
   });
 
-  // 3) (opcjonalnie) walidacja artefaktów (dostosowana do nowej struktury ściągi)
   if (opts.validate) {
     const missingPanels = validateChaptersHavePanels(outDir);
     const studyProblems = validateStudySection(outDir);
@@ -306,20 +396,29 @@ async function runFullPipeline(opts: {
     }
   }
 
-  // 4) Zrzut do DB
   await persistHandbookFolderToDb(outDir, opts.work);
 }
 
 async function main() {
   const argv = minimist(process.argv.slice(2));
   const wantFinishOnly = !!argv.finish;
+  const wantStudyOnly = !!argv.studyOnly;
 
-  // Informacyjne: legacy flagi (nie wpływają na flow)
   if (typeof argv.studyNotes !== 'undefined') {
     console.log(`ℹ️  --studyNotes=${argv.studyNotes} (zignorowane w nowym flow ściągi)`);
   }
   if (typeof argv.analysis !== 'undefined') {
     console.log(`ℹ️  --analysis=${argv.analysis} (zignorowane; ściąga ma własne bloki HTML)`);
+  }
+
+  if (wantStudyOnly) {
+    await regenerateStudySectionOnly({
+      dir: argv.dir ? String(argv.dir) : undefined,
+      work: argv.work ? String(argv.work) : undefined,
+      author: argv.author ? String(argv.author) : undefined,
+      validate: !!argv.validate,
+    });
+    return;
   }
 
   if (wantFinishOnly) {
@@ -328,13 +427,13 @@ async function main() {
     return;
   }
 
-  // Tryb „pełny”
   const work = String(argv.work || '').trim();
   const author = String(argv.author || '').trim();
 
   if (!work || !author) {
     console.error('Użycie: yarn handbook --work "Tytuł" --author "Autor" [--targetMinutes 5] [--desiredChapters 12] [--rangeFrom 1 --rangeTo 12] [--validate]');
     console.error('Albo:  yarn handbook --finish   (tylko indeksowanie najnowszego katalogu .chapters do DB)');
+    console.error('Albo:  yarn handbook --studyOnly [--dir path] [--work "Tytuł"] [--author "Autor"] [--validate]  (regeneruj wyłącznie sekcję maturalną)');
     process.exit(1);
   }
 
