@@ -132,7 +132,7 @@ function guessWorkTitleFromDir(chaptersDir: string): string {
 }
 
 // ==================
-// VALIDACJA (opcjonalna)
+// VALIDACJA (zaktualizowana pod nową strukturę ściągi)
 // ==================
 function validateChaptersHavePanels(chaptersDir: string): string[] {
   const files = listChapterFiles(chaptersDir);
@@ -144,6 +144,14 @@ function validateChaptersHavePanels(chaptersDir: string): string[] {
   return bad;
 }
 
+/**
+ * NOWA walidacja „_SEKCJA_MATURALNA.md”:
+ * - wymagamy <study-section>
+ * - w środku dwie części: <study-global> oraz <study-per-chapter>
+ * - w części per-chapter muszą istnieć bloki z data-chapter="ch-XX"
+ * - dodatkowo: dwa globalne bloki: study-characters oraz study-contexts (minimum dla ściągi)
+ * - markery <!-- study-blocks:start/end -->
+ */
 function validateStudySection(chaptersDir: string): string[] {
   const p = path.join(chaptersDir, '_SEKCJA_MATURALNA.md');
   const problems: string[] = [];
@@ -152,13 +160,32 @@ function validateStudySection(chaptersDir: string): string[] {
     return problems;
   }
   const md = readUtf8(p);
-  const anchors = ['#study-theses', '#study-motifs', '#study-characters', '#study-contexts', '#study-questions', '#study-topscenes'];
-  for (const a of anchors) {
-    if (!md.includes(a)) problems.push(`Brak kotwicy ${a}`);
-  }
+
+  // Markery sekcji (spójność z pipeline)
   if (!md.includes('<!-- study-blocks:start -->') || !md.includes('<!-- study-blocks:end -->')) {
     problems.push('Brak markerów study-blocks:start/end');
   }
+
+  // Opakowanie całości
+  if (!/<study-section[\s>]/i.test(md)) problems.push('Brak <study-section>');
+
+  // Dwie części ściągi
+  if (!/<study-global[\s>]/i.test(md)) problems.push('Brak <study-global>');
+  if (!/<study-per-chapter[\s>]/i.test(md)) problems.push('Brak <study-per-chapter>');
+
+  // Globalne minimum
+  if (!/<study-block[^>]+id=["']study-characters["']/i.test(md)) {
+    problems.push('Brak bloku globalnego: study-characters');
+  }
+  if (!/<study-block[^>]+id=["']study-contexts["']/i.test(md)) {
+    problems.push('Brak bloku globalnego: study-contexts');
+  }
+
+  // Czy istnieją jakiekolwiek bloki per-rozdział
+  if (!/data-chapter=["']ch-\d{2}["']/i.test(md)) {
+    problems.push('Brak bloków per-rozdział (data-chapter="ch-XX") w <study-per-chapter>');
+  }
+
   return problems;
 }
 
@@ -215,7 +242,7 @@ async function persistHandbookFolderToDb(latestChaptersDir: string, workTitleOve
     console.log(`   ✅ ${file} → id: ${id || '(insert fallback)'}`);
   }
 
-  // sekcja maturalna (jeśli jest) → jako OSTATNI „rozdział”
+  // sekcja maturalna (ostatni „rozdział”)
   const sekcja = path.join(latestChaptersDir, '_SEKCJA_MATURALNA.md');
   let totalCount = files.length;
   if (fs.existsSync(sekcja)) {
@@ -223,7 +250,7 @@ async function persistHandbookFolderToDb(latestChaptersDir: string, workTitleOve
     const sortOrder = files.length; // po wszystkich rozdziałach
     const meta = {
       title: 'Sekcja maturalna',
-      description: 'Tezy, motywy, postacie, konteksty, pytania i top sceny (bloki do readera).',
+      description: 'Ściągawka: część globalna + bloki per rozdział (data-chapter="ch-XX").',
     };
     const id = await ensureChapterMeta(handbookId, sortOrder, meta.title, meta.description);
     await setChapterContentForce(handbookId, sortOrder, meta, md);
@@ -257,7 +284,7 @@ async function runFullPipeline(opts: {
     desiredChapters: opts.desiredChapters ?? 12,
   });
 
-  // 2) Rozdziały + Sekcja maturalna (bloki + panele tokenów) → zapis .chapters/*
+  // 2) Rozdziały + Sekcja maturalna → zapis .chapters/*
   const { outDir } = await appendChaptersIndividuallyFromToc({
     filePath: markdownPath,
     workTitle: opts.work,
@@ -267,7 +294,7 @@ async function runFullPipeline(opts: {
     range: opts.rangeFrom || opts.rangeTo ? { from: opts.rangeFrom ?? 1, to: opts.rangeTo ?? (narrativePlan.chapters.length) } : undefined,
   });
 
-  // 3) (opcjonalnie) walidacja artefaktów przed zrzutem do DB
+  // 3) (opcjonalnie) walidacja artefaktów (dostosowana do nowej struktury ściągi)
   if (opts.validate) {
     const missingPanels = validateChaptersHavePanels(outDir);
     const studyProblems = validateStudySection(outDir);
@@ -287,12 +314,12 @@ async function main() {
   const argv = minimist(process.argv.slice(2));
   const wantFinishOnly = !!argv.finish;
 
-  // Informacyjne: legacy flagi (nie wpływają na flow — mamy bloki w sekcji maturalnej)
+  // Informacyjne: legacy flagi (nie wpływają na flow)
   if (typeof argv.studyNotes !== 'undefined') {
-    console.log(`ℹ️  --studyNotes=${argv.studyNotes} (zignorowane; notatki per rozdział nie są używane w tym flow)`);
+    console.log(`ℹ️  --studyNotes=${argv.studyNotes} (zignorowane w nowym flow ściągi)`);
   }
   if (typeof argv.analysis !== 'undefined') {
-    console.log(`ℹ️  --analysis=${argv.analysis} (zignorowane; „pakiet analityczny” nie jest używany — sekcja maturalna generuje bloki)`);
+    console.log(`ℹ️  --analysis=${argv.analysis} (zignorowane; ściąga ma własne bloki HTML)`);
   }
 
   if (wantFinishOnly) {
@@ -301,7 +328,7 @@ async function main() {
     return;
   }
 
-  // Tryb „pełny” (Twój przypadek)
+  // Tryb „pełny”
   const work = String(argv.work || '').trim();
   const author = String(argv.author || '').trim();
 

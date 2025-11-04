@@ -9,45 +9,15 @@ export type ChapterSummary = {
 };
 
 /**
- * Linkuje wystąpienia "(Rozdział X)" -> "([Rozdział X](#ch-0X))"
+ * Zamienia "(Rozdział X)" → link HTML z kotwicą "#ch-0X".
  * Działa zachowawczo: tylko tam, gdzie jest dokładna fraza "Rozdział <liczba>" w nawiasie.
  */
-function linkifyChapterRefs(md: string): string {
-  return md.replace(/\(Rozdział\s+(\d{1,2})\)/g, (_m, n) => {
+function linkifyChapterRefsToHtml(mdOrHtml: string): string {
+  return mdOrHtml.replace(/\(Rozdział\s+(\d{1,2})\)/g, (_m, n) => {
     const idx = Number(n);
     const id = `ch-${String(idx).padStart(2, '0')}`;
-    return `([Rozdział ${idx}](#${id}))`;
+    return `<a href="#${id}">Rozdział ${idx}</a>`;
   });
-}
-
-/** Panel tokenów do linkowania „Sekcji maturalnej” z poziomu rozdziału. */
-export function buildStudyRefsPanelTokens(): string {
-  return [
-    '<!-- study-refs:panel:start -->',
-    '[REF:STUDY:THESES]',
-    '[REF:STUDY:MOTIFS]',
-    '[REF:STUDY:CHARACTERS]',
-    '[REF:STUDY:CONTEXTS]',
-    '[REF:STUDY:QUESTIONS]',
-    '[REF:STUDY:TOPSCENES]',
-    '<!-- study-refs:panel:end -->',
-    '',
-  ].join('\n');
-}
-
-/** Krótki blok „odnośniki globalne” (opcjonalnie dopinany do głównego pliku handbooka). */
-export function buildStudyRefsInline(): string {
-  return [
-    '<!-- study-refs:start -->',
-    '➡️ **Sekcja maturalna:**',
-    '- [Tezy główne](#study-theses)',
-    '- [Motywy](#study-motifs)',
-    '- [Postacie i relacje](#study-characters)',
-    '- [Konteksty](#study-contexts)',
-    '- [Pytania egzaminacyjne](#study-questions)',
-    '- [Top 10 cytatów/scen](#study-topscenes)',
-    '<!-- study-refs:end -->',
-  ].join('\n');
 }
 
 function unwrapCodeFence(s: string) {
@@ -57,77 +27,86 @@ function unwrapCodeFence(s: string) {
   return trimmed.replace(/^```[a-zA-Z0-9-]*\n?/, '').replace(/\n?```$/, '').trim();
 }
 
-/** Generuje CAŁĄ „Sekcję maturalną” jako zestaw bloków z kotwicami (#study-*) */
+/** Dodatkowa SANITACJA HTML dla study-blocków (po LLM). */
+function sanitizeStudyHtml(html: string): string {
+  let out = html;
+
+  // 1) Usuń ewentualne fence’y i zdekoduj typowe encje (gdyby gdzieś przeszły)
+  out = out.replace(/```[a-z0-9-]*\n?/gi, '').replace(/```/g, '');
+  out = out.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+
+  // 2) Usuń puste <li> (to psuło składnię i kolorowanie)
+  out = out.replace(/<li>\s*<\/li>/g, '');
+
+  // 3) Zbędne podwójne spacje/linie w środku list
+  out = out
+    .replace(/(\n|\r)+\s*(<\/li>)/g, '$2')
+    .replace(/<ul>\s+\n/g, '<ul>\n')
+    .replace(/\n\s+<\/ul>/g, '\n</ul>');
+
+  // 4) Upewnij się, że każdy study-block jest odseparowany pustą linią (czytelność/bezpieczny parse)
+  out = out.replace(/<\/study-block>\s*(?=<study-block\b)/g, '</study-block>\n\n');
+
+  // 5) Drobne porządki białych znaków
+  out = out.replace(/[ \t]+\n/g, '\n').trim();
+
+  return out;
+}
+
+/** Generuje CAŁĄ „Sekcję maturalną” jako zestaw SEMANTYCZNYCH BLOKÓW HTML (<study-block id="...">) */
 export async function generateFinalStudySection(
   workTitle: string,
   author: string,
   chapterSummaries: ChapterSummary[]
 ): Promise<string> {
-  const prompt = [
-    `Zwróć WYŁĄCZNIE czysty Markdown (bez code fence'ów).`,
-    ``,
-    `ZADANIE: Napisz LEKKĄ, PRZYSTĘPNĄ sekcję maturalną dla uczniów.`,
-    ``,
+  const material = [
     `DZIEŁO: "${workTitle}" — ${author}`,
     `ROZDZIAŁY: ${chapterSummaries.length}`,
     ``,
-    `TON: Jak COACH EGZAMINACYJNY, nie jak suchy podręcznik.`,
-    `- Konkretnie, zwięźle, bez akademickiego bełkotu`,
-    `- Odsyłasz do konkretnych rozdziałów (numery!)`,
-    `- Parafrazy zamiast długich cytatów`,
-    `- Odpowiedzi na pytania: 2-3 zdania MAX`,
-    ``,
-    `═══════════════════════════════════════════════════════════════`,
-    `STRUKTURA (BLOKI Z KOTWICAMI)`,
-    `═══════════════════════════════════════════════════════════════`,
-    ``,
-    `## 🎯 Tezy główne {#study-theses}`,
-    `- **[Nazwa tezy]** — 1 zdanie wyjaśnienia`,
-    `  → Zobacz: Rozdział X (co się tam dzieje), Rozdział Y (co się tam dzieje)`,
-    ``,
-    `## 🗺️ Mapa motywów {#study-motifs}`,
-    `- **[Motyw]** (Rozdziały: X, Y, Z) — 1 zdanie co reprezentuje`,
-    ``,
-    `## 👥 Postacie i relacje {#study-characters}`,
-    `- **Bohater** — funkcja; relacje: 1–2 punkty`,
-    ``,
-    `## 🧭 Konteksty (2–3) {#study-contexts}`,
-    `- Historyczno-społeczny — 1–2 zdania`,
-    `- Filozoficzny/kulturowy — 1–2 zdania`,
-    ``,
-    `## ❓ Pytania egzaminacyjne (8–10) {#study-questions}`,
-    `**Q: [pytanie]**`,
-    `A: 2–3 zdania MAX z odwołaniem do rozdziałów`,
-    ``,
-    `## 🔟 Top 10 cytatów/scen do matury {#study-topscenes}`,
-    `1. **[Parafraza sceny]** (Rozdział X) — dlaczego ważne (1 zdanie)`,
-    ``,
-    `═══════════════════════════════════════════════════════════════`,
-    `MATERIAŁ ŹRÓDŁOWY (streszczenia rozdziałów)`,
-    `═══════════════════════════════════════════════════════════════`,
-    ``,
+    `════════════════ MATERIAŁ ŹRÓDŁOWY (streszczenia rozdziałów) ════════════════`,
     ...chapterSummaries.map(
       (ch) => [
-        `### Rozdział ${ch.index}: ${ch.title}`,
-        `Kluczowe wydarzenia:`,
-        ...ch.keyEvents.map((e) => `- ${e}`),
-        `Warte zapamiętania:`,
-        ...ch.keyQuotes.map((q) => `- ${q}`),
-        ``,
+        `Rozdział ${ch.index}: ${ch.title}`,
+        `- ${ch.keyEvents.join('\n- ') || '(brak)'}`
       ].join('\n')
     ),
+  ].join('\n');
+
+  const prompt = [
+    `Zwróć WYŁĄCZNIE czysty HTML (bez code fence'ów, bez <html> i <body>).`,
+    `Masz wygenerować sekcję maturalną jako SEMANTYCZNE BLOKI <study-block> z unikalnymi id:`,
+    `- <study-block id="study-theses" data-type="theses"> — lista tez; każda pozycja zawiera odniesienia do rozdziałów w postaci "(Rozdział X)"`,
+    `- <study-block id="study-motifs" data-type="motifs"> — mapa motywów; dla każdego motywu podaj rozdziały w nawiasie "(Rozdział X, Rozdział Y)"`,
+    `- <study-block id="study-characters" data-type="characters"> — postacie i relacje (krótko)`,
+    `- <study-block id="study-contexts" data-type="contexts"> — 2–3 konteksty zwięźle`,
+    `- <study-block id="study-questions" data-type="questions"> — 8–10 pytań i krótkich odpowiedzi (2–3 zdania)`,
+    `- <study-block id="study-topscenes" data-type="topscenes"> — 10 parafraz scen z odwołaniem do rozdziałów`,
     ``,
-    `═══════════════════════════════════════════════════════════════`,
-    `TERAZ WYPEŁNIJ WSZYSTKIE POWYŻSZE BLOKI.`,
-    `PAMIĘTAJ: Lekko, przystępnie, konkretnie!`,
-    `═══════════════════════════════════════════════════════════════`,
+    `W każdym study-block użyj nagłówka <h2> oraz prostego HTML (<ul>, <li>, <p>, <strong>).`,
+    `Unikaj długich cytatów; zamiast tego parafrazuj. Ton: coach egzaminacyjny, zwięźle i konkretnie.`,
+    ``,
+    material,
+    ``,
+    `TERAZ WYRZUĆ TYLKO TE BLOKI <study-block> — nic poza nimi.`,
   ].join('\n');
 
   const raw = await generateMarkdown(prompt);
+  // LLM może oddać Markdown-HTML — zdejmij ewentualne fence'y i podlinkuj rozdziały
+  let cleaned = unwrapCodeFence(raw).trim();
 
-  // Upewnij się, że bloki mają poprawne kotwice – i autolink „Rozdział X”
-  let cleaned = raw.trim();
-  cleaned = linkifyChapterRefs(cleaned);
+  // Przekształć "(Rozdział X)" → <a href="#ch-0X">Rozdział X</a>
+  cleaned = linkifyChapterRefsToHtml(cleaned);
 
-  return cleaned + '\n';
+  // SANITY FIX: usuń puste li, fence’y, itp.
+  cleaned = sanitizeStudyHtml(cleaned);
+
+  // Owiń całość w kontener pomagający readerowi (zachowujemy markery do łatwego parsowania)
+  const wrapped = [
+    '<study-section>',
+    cleaned,
+    '</study-section>',
+    ''
+  ].join('\n');
+
+  return wrapped;
 }

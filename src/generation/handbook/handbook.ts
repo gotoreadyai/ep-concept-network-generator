@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { generateMarkdown } from '../../llm/openai';
 import { planNarrativeStructure, NarrativePlan, ChapterPlan } from './narrative_planner';
-import { generateFinalStudySection, ChapterSummary, buildStudyRefsInline, buildStudyRefsPanelTokens } from './final_study_section';
+import { generateFinalStudySection, ChapterSummary } from './final_study_section';
 import { detectGenreFromStyle, formatGenreExampleForPrompt, getGenreExample } from './genre_examples';
 import { loadOrGenerateCustomExample } from './custom_example_cache';
 
@@ -45,7 +45,7 @@ function slugifyPolish(s: string) {
     .slice(0, 120);
 }
 
-// === Nowe: stabilne ID i slug rozdziału ===
+// === Stabilne ID i slug rozdziału ===
 function makeChapterId(index: number) {
   return `ch-${String(index).padStart(2, '0')}`;
 }
@@ -100,11 +100,25 @@ function softSanitize(md: string) {
   return out.trim() + '\n';
 }
 
-/** Jeśli w rozdziale nie ma panelu tokenów, dodaj go na końcu. */
-function injectStudyPanelIfMissing(md: string): string {
-  if (md.includes('<!-- study-refs:panel:start -->')) return md.endsWith('\n') ? md : md + '\n';
-  const panel = buildStudyRefsPanelTokens();
+/** Jeśli w rozdziale nie ma panelu referencji, dodaj minimalny placeholder ze stabilnym ID rozdziału. */
+function ensureStudyPanel(md: string, chapterId: string): string {
+  if (md.includes('<!-- study-refs:panel:start -->')) {
+    // Upewnij się, że istniejący panel ma data-chapter ustawione poprawnie (jeśli brak — uzupełnij)
+    return md.replace(
+      /(<study-refs-panel)(\b[^>]*?)>/,
+      (_m, tag, attrs) =>
+        attrs.includes('data-chapter=')
+          ? `${tag}${attrs}>`
+          : `${tag}${attrs} data-chapter="${chapterId}">`
+    );
+  }
   const needsNL = md.endsWith('\n') ? '' : '\n';
+  const panel = [
+    '<!-- study-refs:panel:start -->',
+    `<study-refs-panel data-chapter="${chapterId}"></study-refs-panel>`,
+    '<!-- study-refs:panel:end -->',
+    '',
+  ].join('\n');
   return md + needsNL + '\n' + panel;
 }
 
@@ -353,9 +367,9 @@ async function generateChapterWithContext(args: {
     md = `## Rozdział ${chapterPlan.index}: ${chapterPlan.title} {#${makeChapterId(chapterPlan.index)}}\n${md}\n`;
   }
 
-  // sanity + panel tokenów
+  // sanity + placeholder panelu referencji (HTML) dla wstawek kontekstowych
   md = softSanitize(md);
-  md = injectStudyPanelIfMissing(md);
+  md = ensureStudyPanel(md, makeChapterId(chapterPlan.index));
 
   return md;
 }
@@ -432,9 +446,8 @@ export async function appendChaptersIndividuallyFromToc(args: {
     results.push({ index: i, title: chapterPlan.title, path: file, id, slug });
   }
 
-  console.log(`\n📚 Generuję sekcję maturalną jako BLOKI...`);
+  console.log(`\n📚 Generuję sekcję maturalną jako BLOKI HTML...`);
   const studyBlocks = await generateFinalStudySection(args.workTitle, args.author, chapterSummaries);
-  const studyRefs = buildStudyRefsInline();
 
   // study-index (pomocniczy komentarz dla frontu)
   const studyIndex = {
@@ -448,9 +461,8 @@ export async function appendChaptersIndividuallyFromToc(args: {
   };
   const studyIndexComment = `<!-- study-index: ${JSON.stringify(studyIndex)} -->`;
 
-  // 1) Opcjonalnie dopisz panel odnośników i bloki do GŁÓWNEGO pliku handbooka (nie wymagane przez reader DB-only)
+  // 1) Dopisz TYLKO bloki do GŁÓWNEGO pliku handbooka (bez globalnego inline panelu)
   const appendPayloadForHandbook = [
-    `\n\n${studyRefs}\n`,
     `<!-- study-blocks:start -->`,
     studyBlocks.trim(),
     `<!-- study-blocks:end -->`,
@@ -463,7 +475,7 @@ export async function appendChaptersIndividuallyFromToc(args: {
     console.warn(`   ⚠️  Nie udało się dopisać study-blocks do pliku bazowego: ${(e as Error).message}`);
   }
 
-  // 2) ZAPISZ osobny plik _SEKCJA_MATURALNA.md w katalogu .chapters → to trafi do DB przez indexer
+  // 2) ZAPISZ osobny plik _SEKCJA_MATURALNA.md z blokami HTML w katalogu .chapters
   const studySectionPath = path.join(baseOut, '_SEKCJA_MATURALNA.md');
   const studySectionContent = [
     `<!-- study-blocks:start -->`,
@@ -472,7 +484,7 @@ export async function appendChaptersIndividuallyFromToc(args: {
     `\n${studyIndexComment}\n`,
   ].join('\n');
   fs.writeFileSync(studySectionPath, studySectionContent, 'utf8');
-  console.log(`   ✅ Sekcja maturalna → ${path.basename(studySectionPath)} (dla DB)`);
+  console.log(`   ✅ Sekcja maturalna (HTML) → ${path.basename(studySectionPath)} (dla DB)`);
 
   return { outDir: baseOut, written: results };
 }
