@@ -2,7 +2,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { generateMarkdown } from '../../llm/openai';
-import { planNarrativeStructure, NarrativePlan, ChapterPlan } from './narrative_planner';
+import { planNarrativeStructure, NarrativePlan } from './narrative_planner';
 import { generateFinalStudySection, ChapterSummary, sanitizeChapterTitle } from './final_study_section';
 
 export type HandbookInput = {
@@ -31,6 +31,79 @@ function slugifyPolish(s: string) {
     .replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '').slice(0,120);
 }
 
+/** Czyści nagłówki z {#ch-XX} i usuwa duplikaty, zamienia [Scena ...] na zwykły akapit. */
+function normalizeChapterMarkdown(md: string): string {
+  let out = md.replace(/\r/g, '');
+  // usuń {#ch-XX} z nagłówków
+  out = out.replace(/^(#{1,3}\s+.*)\s*\{#ch-\d{2}\}\s*$/gmi, (_m, h) => h.trim());
+  // [Scena ...] lub *[Scena ...]* -> akapit
+  out = out.replace(/^\s*\*?\[([^[\]]+?)\]\*?\s*$/m, (_m, inside) => `${String(inside).trim()}`);
+  // duplikujące się nagłówki jeden po drugim
+  out = out.replace(/^(#{1,3}\s+.+)\n\1\n/gm, (_m, h) => `${h}\n`);
+  // kosmetyka pustych linii
+  out = out.replace(/\n{3,}/g, '\n\n');
+  return out.trim() + '\n';
+}
+
+/** Wyciąga 3–5 zdań „key events” z treści rozdziału (na potrzeby ściągi). */
+function extractKeyEvents(chapterMd: string): string[] {
+  let text = chapterMd
+    .replace(/<!--[\s\S]*?-->/g, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\*\[[^\]]+\]\*/g, ' ')
+    .replace(/^##.+$/gm, ' ')
+    .replace(/\{#ch-\d{2}\}/g, ' ')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+
+  const sentences = text.split(/[.!?]+/).map((s) => s.trim()).filter((s) => s.length > 20 && s.length < 220);
+  return sentences.slice(0, 5);
+}
+
+/** Buduje prośbę do modelu o pełny rozdział z płynnymi dialogami i fabularnym wstępem. */
+function buildChapterPrompt(args: {
+  workTitle: string;
+  author: string;
+  chIndex: number;
+  chTitle: string;
+  chType: string;
+  pov: string;
+  povCharacter?: string;
+  planDescription: string;
+  targetMinutesPerChapter: number;
+}) {
+  const minutes = clamp(Math.round(args.targetMinutesPerChapter || 5), 3, 8);
+  // Zakładamy 160–190 słów/minutę
+  const targetWords = clamp(minutes * 170, 500, 1400);
+
+  return [
+    `Zwróć WYŁĄCZNIE czysty Markdown (bez code fence'ów).`,
+    ``,
+    `Dzieło: "${args.workTitle}" — ${args.author}`,
+    `Rozdział ${args.chIndex}: ${sanitizeChapterTitle(args.chTitle)}`,
+    ``,
+    `WYMAGANIA NARRACYJNE (KLUCZOWE):`,
+    `- Zacznij od 1–2 zdań *fabularnego wprowadzenia* (kontekst miejsca/czasu/sytuacji).`,
+    `- Dialogi prowadź PŁYNNIE: całe 3–4 wymiany pod rząd bez didaskaliów; gesty dawkuj rzadziej (co 2–3 kwestie), krótkie frazy.`,
+    `- Unikaj poszatkowania: nie wtrącaj po każdej linijce opisu gestu.`,
+    `- Sceny łącz krótkimi mostkami narracyjnymi (1–2 zdania) zamiast cięć.`,
+    `- Bez kotwic {#ch-XX}. Opis typu [Scena w salonie…] NIE używaj — opisz to zdaniami fabularnymi.`,
+    `- Długość: ~${targetWords} słów (±15%).`,
+    ``,
+    `INSPIRACJA/PLAN (skrót akcji, nie cytuj):`,
+    `- ${args.planDescription}`,
+    ``,
+    `POV: ${args.pov}${args.povCharacter ? ` (${args.povCharacter})` : ''}, typ: ${args.chType}.`,
+    ``,
+    `Struktura wyjścia:`,
+    `## Rozdział ${String(args.chIndex)}: ${sanitizeChapterTitle(args.chTitle)}`,
+    ``,
+    `(1 akapit fabularnego wprowadzenia – proza, nie w nawiasach)`,
+    ``,
+    `(Dalej scena/e: dialogi + krótkie mostki narracyjne; minimum dwa fragmenty płynnego dialogu bez didaskaliów w środku)`,
+  ].join('\n');
+}
+
 export function parseToc(md: string): Array<{ title: string; description: string }> {
   const lines = md.split('\n'); const items: Array<{ title: string; description: string }> = []; let inToc = false;
   for (const raw of lines) {
@@ -48,9 +121,12 @@ export function parseToc(md: string): Array<{ title: string; description: string
 
 function softSanitize(md: string) {
   let out = md.replace(/\r/g, '');
+  // kosmetyka drobna spisu treści i markerów
   out = out.replace(/\bPrzejścia:/g, '*Przejście:*').replace(/(^|\n)Przejście:/g, '$1*Przejście:*');
-  out = out.replace(/^\s*\[([^[\]]+?)\]\s*$/m, (_m, inside) => `*[${String(inside).trim()}]*`);
-  out = out.replace(/(^##[^\n]+?\n)\*([^*][^\n]*?)\*\n/, (_m, head, body) => `${head}${body}\n`);
+  // [meta] → akapit
+  out = out.replace(/^\s*\[([^[\]]+?)\]\s*$/m, (_m, inside) => `*${String(inside).trim()}*`);
+  // usuń ewentualny duplikat H1
+  out = out.replace(/^(# .+)\n\1\n/gm, (_m, h) => `${h}\n`);
   return out.trim() + '\n';
 }
 
@@ -72,7 +148,7 @@ export async function generateHandbook(input: HandbookInput): Promise<HandbookRe
     ``,
     `## Spis treści`,
     ...narrativePlan.chapters.map(
-      (ch) => `- ${ch.index}. **${ch.title}** — ${ch.description}`
+      (ch) => `- ${ch.index}. **${sanitizeChapterTitle(ch.title)}** — ${ch.description}`
     ),
   ].join('\n');
 
@@ -96,24 +172,9 @@ export type AppendOpts = {
   narrativePlan?: NarrativePlan;
 };
 
-/** Proste wydobycie „key events” do globalnej sekcji (bez HTML, bez paneli) */
-function extractKeyEvents(chapterMd: string): string[] {
-  let text = chapterMd
-    .replace(/<!--[\s\S]*?-->/g, ' ')
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/\*\[[^\]]+\]\*/g, ' ')
-    .replace(/^##.+$/gm, ' ')
-    .replace(/\{#ch-\d{2}\}/g, ' ')
-    .replace(/\s{2,}/g, ' ')
-    .trim();
-
-  const sentences = text.split(/[.!?]+/).map((s) => s.trim()).filter((s) => s.length > 20 && s.length < 200);
-  return sentences.slice(0, 5);
-}
-
 /**
- * NOWA wersja: nie generujemy ŻADNYCH „per-chapter” bloków.
- * Tworzymy tylko _SEKCJA_MATURALNA.md (global study-blocks).
+ * NOWA wersja: GENERUJEMY PEŁNE ROZDZIAŁY ch-XX.md
+ * + na końcu powstaje _SEKCJA_MATURALNA.md na bazie faktycznej treści rozdziałów.
  */
 export async function appendChaptersIndividuallyFromToc(args: {
   filePath: string;
@@ -129,47 +190,89 @@ export async function appendChaptersIndividuallyFromToc(args: {
   const baseOut = args.outDir || path.join(path.dirname(args.filePath), `${baseName}.chapters`);
   ensureDir(baseOut);
 
-  // NIE PISZEMY rozdziałów – bierzemy tylko plan do zbudowania ChapterSummary „na sucho”
-  const results: Array<{ index: number; title: string; path: string; id: string; slug: string }> = [];
-  const chapterSummaries: ChapterSummary[] = [];
+  const from = args.range?.from ?? 1;
+  const to = args.range?.to ?? args.narrativePlan.chapters.length;
+
+  const written: Array<{ index: number; title: string; path: string; id: string; slug: string }> = [];
 
   for (const ch of args.narrativePlan.chapters) {
+    if (ch.index < from || ch.index > to) continue;
+
     const cleanTitle = sanitizeChapterTitle(ch.title);
     const id = `ch-${String(ch.index).padStart(2, '0')}`;
-    const slug = `${id}`;
-    // „keyEvents” z opisu planu (wystarczy do globalnej sekcji)
-    const kev = extractKeyEvents(`${ch.description}.`);
-    chapterSummaries.push({
-      index: ch.index,
+    const slug = `${id}-${slugifyPolish(cleanTitle)}`;
+    const outPath = path.join(baseOut, `${slug}.md`);
+
+    // Pominięcie jeśli istnieje i nie wymusiliśmy
+    if (!args.force && fs.existsSync(outPath)) {
+      const existing = normalizeChapterMarkdown(fs.readFileSync(outPath, 'utf8'));
+      fs.writeFileSync(outPath, existing, 'utf8'); // tylko normalizacja na świeżo
+      console.log(`↩️  Pominąłem generację (istnieje): ${path.basename(outPath)}`);
+      written.push({ index: ch.index, title: cleanTitle, path: outPath, id, slug });
+      continue;
+    }
+
+    const prompt = buildChapterPrompt({
+      workTitle: args.workTitle,
+      author: args.author,
+      chIndex: ch.index,
+      chTitle: cleanTitle,
+      chType: ch.type,
+      pov: ch.pov,
+      povCharacter: ch.povCharacter,
+      planDescription: ch.description,
+      targetMinutesPerChapter: args.targetMinutesPerChapter ?? 5,
+    });
+
+    console.log(`📝 Generuję rozdział ${ch.index}: ${cleanTitle}...`);
+    const raw = await generateMarkdown(prompt);
+    let md = unwrapCodeFence(String(raw));
+    md = normalizeChapterMarkdown(md);
+
+    // Gwarancja nagłówka
+    if (!/^##\s+Rozdział\s+\d+:/m.test(md)) {
+      md = `## Rozdział ${String(ch.index)}: ${cleanTitle}\n\n` + md.trim() + '\n';
+    }
+
+    fs.writeFileSync(outPath, md, 'utf8');
+    console.log(`   ✅ zapisano ${path.basename(outPath)}`);
+
+    written.push({ index: ch.index, title: cleanTitle, path: outPath, id, slug });
+  }
+
+  // === ZBUDUJ STRESS-NOTES NA PODSTAWIE FAKTYCZNYCH ROZDZIAŁÓW ===
+  const chapterFiles = fs.readdirSync(baseOut).filter(f => /^ch-\d+.*\.md$/i.test(f)).sort((a,b) => {
+    const na = parseInt(a.match(/^ch-(\d+)/i)?.[1] ?? '0', 10);
+    const nb = parseInt(b.match(/^ch-(\d+)/i)?.[1] ?? '0', 10);
+    return na - nb;
+  });
+
+  const summaries: ChapterSummary[] = chapterFiles.map((fname, i) => {
+    const idx = parseInt(fname.match(/^ch-(\d+)/i)?.[1] ?? String(i+1), 10);
+    const md = fs.readFileSync(path.join(baseOut, fname), 'utf8');
+    const titleLine = md.split(/\r?\n/).find(l => /^##\s+Rozdział/.test(l)) || `Rozdział ${idx}`;
+    const cleanTitle = titleLine.replace(/^##\s+/, '').trim();
+    const kev = extractKeyEvents(md);
+    return {
+      index: idx,
       title: cleanTitle,
       keyEvents: kev,
       keyQuotes: kev.slice(0, 2),
-    });
-    // nie tworzymy plików rozdziałów:
-    results.push({ index: ch.index, title: cleanTitle, path: '', id, slug });
-  }
+    };
+  });
 
-  console.log(`\n📚 Generuję WYŁĄCZNIE sekcję maturalną (global study-blocks)...`);
-  const studyBlocksWrapped = await generateFinalStudySection(args.workTitle, args.author, chapterSummaries);
+  console.log(`\n📚 Generuję sekcję maturalną (global study-blocks) z ${summaries.length} rozdziałów...`);
+  const studyBlocksWrapped = await generateFinalStudySection(args.workTitle, args.author, summaries);
 
-  const studyIndex = {
-    chapters: results.map((r) => ({ index: r.index, id: r.id, slug: r.slug, title: r.title })),
-    axes: [] as string[],
-  };
-  const studyIndexComment = `<!-- study-index: ${JSON.stringify(studyIndex)} -->`;
-
-  // Zapisz osobny plik dla DB
   const studySectionPath = path.join(baseOut, '_SEKCJA_MATURALNA.md');
   const payload = [
     `<!-- study-blocks:start -->`,
     studyBlocksWrapped.trim(),
     `<!-- study-blocks:end -->`,
-    `\n${studyIndexComment}\n`,
+    ``,
   ].join('\n');
   fs.writeFileSync(studySectionPath, payload, 'utf8');
   console.log(`   ✅ ${path.basename(studySectionPath)} zapisany.`);
 
-  // ⛔️ NIC nie dopisujemy do pliku bazowego handbooka
-
-  return { outDir: baseOut, written: results };
+  return { outDir: baseOut, written };
 }
