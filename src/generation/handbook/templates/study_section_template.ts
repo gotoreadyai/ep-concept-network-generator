@@ -1,33 +1,88 @@
 // file: src/generation/handbook/templates/study_section_template.ts
 /**
- * Minimalny, deterministyczny „silnik szablonów” dla sekcji maturalnej.
- *
- * Wejście: lista bloków { id, title, items[] }
- * Wyjście: gotowy HTML z <study-section><study-global>…</study-global></study-section>
- *
- * Brak regexów do walidacji struktury HTML – generujemy markup w 100% po naszej stronie.
+ * Deterministyczny renderer sekcji maturalnej + linkowanie "(Rozdział ...)".
+ * - Linkujemy liczby (1, 6, 3–5) wewnątrz nawiasów.
+ * - Słowo "Rozdział" zostaje tekstem.
+ * - Brak regexów do walidacji HTML; całość składamy świadomie.
  */
+
 export type StudyBlock = {
-    id: string;                    // np. "study-theses"
-    title: string;                 // np. "Tezy i problemy"
-    items: string[];               // czysty tekst, BEZ HTML
+    id: string;          // np. "study-theses"
+    title: string;       // np. "Tezy i problemy"
+    items: string[];     // czysty tekst, BEZ HTML
   };
   
   export type LinkStrategy =
-    | { mode: 'none' }
-    | { mode: 'hash' }                                     // "(Rozdział X)" → <a href="#ch-0X">…</a>
-    | { mode: 'map'; hrefMap: Record<number, string> };    // mapowanie numer → href (np. do slugów)
+    | { mode: 'none' } // bez linków
+    | { mode: 'hash' } // #ch-XX
+    | { mode: 'map'; hrefMap: Record<number, string> }; // num -> href (np. slug)
   
   function escapeHtml(s: string): string {
-    return s
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;');
+    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+  
+  function hrefFor(n: number, strategy: LinkStrategy): string | null {
+    if (strategy.mode === 'hash') return `#ch-${String(n).padStart(2, '0')}`;
+    if (strategy.mode === 'map') return strategy.hrefMap[n] || null;
+    return null;
   }
   
   /**
-   * Linkowanie wyłącznie wzorca tekstowego "(Rozdział X)", bez użycia regexów w runtime.
-   * Zachowujemy pełny escaping pozostałej treści.
+   * Renderuje zawartość nawiasu "(Rozdział ...)" z linkami:
+   * - "1, 6" → Rozdział <a href="#ch-01">1</a>, <a href="#ch-06">6</a>
+   * - "3–5"  → Rozdział <a href="#ch-03">3</a>–<a href="#ch-05">5</a>
+   * Zachowujemy oryginalne spacje przy przecinkach oraz rodzaj łącznika (-/–/—).
+   */
+  function renderChapterRefsList(rawList: string, strategy: LinkStrategy): string {
+    // rozdziel po przecinkach Z ZACHOWANIEM separatorów (np. ", "):
+    const parts = rawList.split(/(\s*,\s*)/); // np. ["1", ", ", "6"]
+    let html = 'Rozdział ';
+  
+    for (let i = 0; i < parts.length; i++) {
+      const chunk = parts[i];
+  
+      // separator przecinka — wypisz jak jest (escapując)
+      if (i % 2 === 1) {
+        html += escapeHtml(chunk);
+        continue;
+      }
+  
+      const token = chunk.trim();
+      if (!token) continue;
+  
+      // zakres? (różne łączniki: -, –, —)
+      const mRange = token.match(/^(\d{1,2})\s*([\-–—])\s*(\d{1,2})$/);
+      if (mRange) {
+        const a = Number(mRange[1]);
+        const dash = mRange[2];
+        const b = Number(mRange[3]);
+        const hrefA = hrefFor(a, strategy);
+        const hrefB = hrefFor(b, strategy);
+        html += hrefA ? `<a href="${escapeHtml(hrefA)}">${escapeHtml(String(a))}</a>` : escapeHtml(String(a));
+        html += escapeHtml(dash);
+        html += hrefB ? `<a href="${escapeHtml(hrefB)}">${escapeHtml(String(b))}</a>` : escapeHtml(String(b));
+        continue;
+      }
+  
+      // pojedynczy numer
+      const mSingle = token.match(/^(\d{1,2})$/);
+      if (mSingle) {
+        const n = Number(mSingle[1]);
+        const href = hrefFor(n, strategy);
+        html += href ? `<a href="${escapeHtml(href)}">${escapeHtml(String(n))}</a>` : escapeHtml(String(n));
+        continue;
+      }
+  
+      // fallback – nieoczekiwany format, wypisz surowo (escapując)
+      html += escapeHtml(token);
+    }
+  
+    return html;
+  }
+  
+  /**
+   * Linkuje wszystkie wystąpienia "(Rozdział ...)" w tekście.
+   * Reszta treści jest escapowana.
    */
   function linkifyChapterRefs(raw: string, strategy: LinkStrategy): string {
     if (strategy.mode === 'none') return escapeHtml(raw);
@@ -43,41 +98,28 @@ export type StudyBlock = {
         break;
       }
   
-      // prefix przed wzorcem
+      // prefix
       out += escapeHtml(raw.slice(i, pos));
   
-      // spróbuj sparsować numer "(Rozdział XX)"
+      // spróbuj odczytać wnętrze aż do ')'
       let j = pos + open.length;
-      let numStr = '';
-      while (j < raw.length && numStr.length < 2 && raw[j] >= '0' && raw[j] <= '9') {
-        numStr += raw[j];
-        j++;
+      let inner = '';
+      let closed = false;
+      while (j < raw.length) {
+        const ch = raw[j++];
+        if (ch === ')') { closed = true; break; }
+        inner += ch;
       }
   
-      // oczekujemy ')'
-      if (numStr.length >= 1 && j < raw.length && raw[j] === ')') {
-        const idx = Number(numStr);
-        const href =
-          strategy.mode === 'hash'
-            ? `#ch-${String(idx).padStart(2, '0')}`
-            : strategy.mode === 'map'
-              ? (strategy.hrefMap[idx] || '')
-              : '';
-  
-        const label = `Rozdział ${idx}`;
-        if (href) {
-          out += `<a href="${escapeHtml(href)}">${escapeHtml(label)}</a>`;
-        } else {
-          out += escapeHtml(`(${label})`);
-        }
-  
-        i = j + 1; // przeskocz ')'
-        continue;
+      if (closed) {
+        // wyrenderuj listę rozdziałów z linkami
+        out += renderChapterRefsList(inner.trim(), strategy);
+        i = j; // po ')'
+      } else {
+        // brak zamknięcia – potraktuj jako zwykły tekst
+        out += escapeHtml(open);
+        i = pos + open.length;
       }
-  
-      // niepełny wzorzec → traktuj jako tekst
-      out += escapeHtml(raw.slice(pos, pos + open.length));
-      i = pos + open.length;
     }
   
     return out;
@@ -101,7 +143,7 @@ export type StudyBlock = {
   
   export function renderStudySection(
     blocks: StudyBlock[],
-    strategy: LinkStrategy = { mode: 'none' }
+    strategy: LinkStrategy = { mode: 'hash' } // domyślnie: #ch-XX
   ): string {
     const inner = blocks.map(b => renderBlock(b, strategy)).join('\n\n');
     return [
@@ -113,4 +155,3 @@ export type StudyBlock = {
       '',
     ].join('\n');
   }
-  
